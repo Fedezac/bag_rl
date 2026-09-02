@@ -21,6 +21,7 @@ from torchrl.envs import (
 from torchrl.envs.libs.gym import GymEnv
 from torchrl.envs.utils import check_env_specs
 
+from src.env.constraints import build_cost_transform
 from src.env.rewards import REWARD_SHAPERS
 
 
@@ -42,12 +43,23 @@ def build_reward_transform(spec):
     return spec()
 
 
-def make_single_env(env_name, device="cpu", custom_reward_functions=None, **gym_kwargs):
+def make_single_env(
+    env_name,
+    device="cpu",
+    custom_reward_functions=None,
+    constraints=None,
+    **gym_kwargs,
+):
     """Build one gym env. Observations stay *raw* -- the networks normalise."""
     transforms = []
     shaper = build_reward_transform(custom_reward_functions)
     if shaper is not None:
         transforms.append(shaper)
+    # Costs are read off the same observation the shaper sees, and are written
+    # to their own key -- they never touch the reward.
+    cost = build_cost_transform(env_name, constraints)
+    if cost is not None:
+        transforms.append(cost)
     transforms += [DoubleToFloat(), StepCounter()]
     return TransformedEnv(
         GymEnv(env_name=env_name, device=device, **gym_kwargs),
@@ -61,6 +73,7 @@ def make_batched_env(
     device="cpu",
     mode="serial",
     custom_reward_functions=None,
+    constraints=None,
     **gym_kwargs,
 ):
     """Build a batch of ``num_envs`` gym instances stepped as one env."""
@@ -70,6 +83,7 @@ def make_batched_env(
             env_name,
             device=device,
             custom_reward_functions=custom_reward_functions,
+            constraints=constraints,
             **gym_kwargs,
         )
     )
@@ -79,10 +93,13 @@ def make_batched_env(
     return env_cls(num_envs, creator, device=device)
 
 
-def env_specs(env_name, custom_reward_functions=None, **gym_kwargs):
+def env_specs(env_name, custom_reward_functions=None, constraints=None, **gym_kwargs):
     """Read obs/action specs off a throwaway env."""
     env = make_single_env(
-        env_name, custom_reward_functions=custom_reward_functions, **gym_kwargs
+        env_name,
+        custom_reward_functions=custom_reward_functions,
+        constraints=constraints,
+        **gym_kwargs,
     )
     check_env_specs(env)
     specs = (env.observation_spec["observation"].shape[-1], env.action_spec)

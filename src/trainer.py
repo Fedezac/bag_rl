@@ -3,6 +3,7 @@
 import statistics
 from collections import defaultdict
 from functools import partial
+from pathlib import Path
 
 import torch
 from tensordict import TensorDict
@@ -38,6 +39,7 @@ class Trainer:
         render_every=5,
         render_steps=500,
         video_folder="./videos",
+        checkpoint_dir=None,
         seed=None,
         progress=True,
     ):
@@ -52,6 +54,10 @@ class Trainer:
         self.env_name = algorithm.env_name
         self.device = algorithm.device
         self.custom_reward_functions = algorithm.custom_reward_functions
+        # Read off the algorithm: the collector envs must emit the cost key the
+        # algorithm's cost critic expects, and a mismatch is silent -- the
+        # collector drops undeclared keys without warning.
+        self.constraints = getattr(algorithm, "constraints", None)
 
         self.num_workers = num_workers
         self.envs_per_worker = envs_per_worker
@@ -67,6 +73,10 @@ class Trainer:
         self.render_every = render_every
         self.render_steps = render_steps
         self.video_folder = video_folder
+        self.checkpoint_dir = Path(checkpoint_dir) if checkpoint_dir else None
+        if self.checkpoint_dir is not None:
+            self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        self._best_eval = None
         self.seed = seed
         self.progress = progress
 
@@ -100,6 +110,7 @@ class Trainer:
             device="cpu",
             mode=self.env_batch_mode,
             custom_reward_functions=self.custom_reward_functions,
+            constraints=self.constraints,
         )
         self.collector = MultiSyncCollector(
             create_env_fn=[env_fn] * self.num_workers,
@@ -123,6 +134,7 @@ class Trainer:
             self.env_name,
             self.device,
             custom_reward_functions=self.custom_reward_functions,
+            constraints=self.constraints,
         )
 
         if self.render_every:
@@ -200,7 +212,7 @@ class Trainer:
     def evaluate(self):
         """Roll the policy out without exploration and log
         """
-        returns, shaped, per_step, steps = [], [], [], []
+        returns, shaped, per_step, steps, costs = [], [], [], [], []
         with set_exploration_type(ExplorationType.DETERMINISTIC), torch.no_grad():
             for _ in range(self.eval_episodes):
                 rollout = self.eval_env.rollout(self.eval_steps, self.algorithm.policy)
@@ -208,6 +220,8 @@ class Trainer:
                 per_step.append(rollout["next", self.reward_key].mean().item())
                 if self.shaped_key is not None:
                     shaped.append(rollout["next", self.shaped_key].sum().item())
+                if self.constraints:
+                    costs.append(rollout["next", "cost"].mean().item())
                 steps.append(rollout["step_count"].max().item())
                 del rollout
 
@@ -220,6 +234,26 @@ class Trainer:
         if shaped:
             self.logs["eval shaped (sum)"].append(statistics.fmean(shaped))
         self.logs["eval step_count"].append(max(steps))
+        self.logs["eval step_count (mean)"].append(statistics.fmean(steps))
+        if costs:
+            self.logs["eval cost"].append(statistics.fmean(costs))
+
+        self._maybe_checkpoint()
+
+    def _maybe_checkpoint(self):
+        """Save the latest policy, and separately the best one seen so far
+        """
+        if self.checkpoint_dir is None:
+            return
+        import torch as _torch
+
+        state = self.algorithm.state_dict()
+        _torch.save(state, self.checkpoint_dir / "final.pt")
+
+        current = self.logs["eval reward (sum)"][-1]
+        if self._best_eval is None or current > self._best_eval:
+            self._best_eval = current
+            _torch.save(state, self.checkpoint_dir / "best.pt")
 
     def render(self):
         """Record one greedy episode into the training video."""
@@ -267,6 +301,11 @@ class Trainer:
                 f"shaped={self.logs['shaped_reward'][-1]: 4.4f} "
                 f"(init={self.logs['shaped_reward'][0]: 4.4f})"
             )
+        if self.logs["cost"]:
+            cost = f"cost={self.logs['cost'][-1]:.4f}"
+            if self.logs["eval cost"]:
+                cost += f" (eval {self.logs['eval cost'][-1]:.4f})"
+            parts.append(f"{cost}, lambda={self.logs['lagrange'][-1]:.3f}")
         if self.logs["step_count"]:
             parts.append(f"step count (max): {self.logs['step_count'][-1]}")
         if self.logs["lr"]:
@@ -309,6 +348,27 @@ class Trainer:
             ),
             "eval_steps_final": (
                 self.logs["eval step_count"][-1] if self.logs["eval step_count"] else -1
+            ),
+            # Needed to turn the return sums above into per-step rates
+            "eval_steps_mean": (
+                f"{self.logs['eval step_count (mean)'][-1]:.1f}"
+                if self.logs["eval step_count (mean)"]
+                else -1
+            ),
+            "train_cost_last10": (
+                f"{sum(self.logs['cost'][-10:]) / len(self.logs['cost'][-10:]):.4f}"
+                if self.logs["cost"]
+                else float("nan")
+            ),
+            "eval_cost_final": (
+                f"{self.logs['eval cost'][-1]:.4f}"
+                if self.logs["eval cost"]
+                else float("nan")
+            ),
+            "lagrange_final": (
+                f"{self.logs['lagrange'][-1]:.4f}"
+                if self.logs["lagrange"]
+                else float("nan")
             ),
             "policy_scale_final": f"{scale[-1] if scale else float('nan'):.4f}",
             "policy_scale_init": f"{scale[0] if scale else float('nan'):.4f}",

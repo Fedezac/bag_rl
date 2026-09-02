@@ -11,6 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import torch  # noqa: E402
 from torch import multiprocessing  # noqa: E402
 
+from src.env.constraints import CONSTRAINT_TERMS  # noqa: E402
 from src.env.rewards import REWARD_SHAPERS  # noqa: E402
 from src.ppo import PPO  # noqa: E402
 from src.trainer import Trainer  # noqa: E402
@@ -94,6 +95,15 @@ def parse_args():
     )
     p.add_argument("--video-folder", default="./videos")
     p.add_argument(
+        "--checkpoint-dir",
+        default=None,
+        help=(
+            "directory for best.pt / final.pt policy checkpoints, written at "
+            "each eval. Off by default; without it a finished run leaves no "
+            "policy behind to inspect."
+        ),
+    )
+    p.add_argument(
         "--policy-std",
         choices=["dependent", "independent"],
         default="dependent",
@@ -102,6 +112,48 @@ def parse_args():
             "it off the network output (NormalParamExtractor); 'independent' "
             "learns one free parameter per action dim (PPO/SB3 convention)."
         ),
+    )
+    p.add_argument(
+        "--constraints",
+        default=None,
+        help=(
+            "comma-separated constraint costs, e.g. 'tilt,height'. These go to "
+            "a SEPARATE cost channel bounded by a Lagrange multiplier, not "
+            "into the reward -- a constraint cannot be bought by earning more "
+            "reward elsewhere. Available: " + ", ".join(sorted(CONSTRAINT_TERMS))
+        ),
+    )
+    p.add_argument(
+        "--cost-limit",
+        type=float,
+        default=0.02,
+        help=(
+            "per-step cost budget. 0.02 reads as 'violate on at most 2%% of "
+            "steps'; independent of episode length."
+        ),
+    )
+    p.add_argument(
+        "--lagrange-lr",
+        type=float,
+        default=0.035,
+        help="dual ascent rate for the multiplier; higher enforces faster but oscillates",
+    )
+    p.add_argument(
+        "--lagrange-init",
+        type=float,
+        default=0.01,
+        help=(
+            "initial multiplier. Non-zero by default: dual ascent moves the "
+            "underlying parameter by ~lagrange-lr per iteration, so starting "
+            "at exactly 0 leaves the constraint effectively inert for the "
+            "first few hundred iterations of a short run."
+        ),
+    )
+    p.add_argument(
+        "--lagrange-max",
+        type=float,
+        default=None,
+        help="optional ceiling on the multiplier, to stop it swamping the reward",
     )
     p.add_argument("--seed", type=int, default=None)
     p.add_argument("--device", default=None, help="e.g. cuda:0 or cpu")
@@ -129,6 +181,11 @@ def main():
         num_epochs=args.num_epochs,
         sub_batch_size=args.sub_batch_size,
         entropy_eps=args.entropy_eps,
+        constraints=args.constraints,
+        cost_limit=args.cost_limit,
+        lagrange_lr=args.lagrange_lr,
+        lagrange_init=args.lagrange_init,
+        lagrange_max=args.lagrange_max,
         device=args.device,
     )
     trainer = Trainer(
@@ -142,6 +199,7 @@ def main():
         eval_episodes=args.eval_episodes,
         render_every=args.render_every,
         video_folder=args.video_folder,
+        checkpoint_dir=args.checkpoint_dir,
         seed=args.seed,
     )
 

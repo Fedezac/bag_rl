@@ -21,6 +21,7 @@ from torchrl.objectives.value import GAE
 from src.algorithm import Algorithm
 from src.env.utils import warmup_obs_norm
 from src.ppo.denormalized_value_head import DenormalizedValueHead
+from src.ppo.lagrange import LagrangeMultiplier
 from src.ppo.running_observation_normalizer import RunningObsNorm
 from src.ppo.state_independent_normal_params import StateIndependentNormalParams
 
@@ -54,6 +55,11 @@ class PPO(Algorithm):
         entropy_eps=1e-4,
         critic_coeff=1.0,
         max_grad_norm=1.0,
+        constraints=None,
+        cost_limit=0.02,
+        lagrange_lr=0.035,
+        lagrange_init=0.01,
+        lagrange_max=None,
         in_keys=None,
         out_keys=None,
         device=None,
@@ -61,6 +67,7 @@ class PPO(Algorithm):
         super().__init__(
             env_name,
             custom_reward_functions=custom_reward_functions,
+            constraints=constraints,
             device=device,
         )
         in_keys = list(in_keys) if in_keys is not None else ["observation"]
@@ -154,6 +161,69 @@ class PPO(Algorithm):
         )
         self.value_module = ValueOperator(module=self.value_net, in_keys=in_keys)
 
+        # Cost critic and Lagrange multiplier, built only when constraints are
+        # active
+        self.cost_value_module = None
+        self.cost_advantage_module = None
+        self.cost_value_norm = None
+        self.lagrange = None
+        if constraints:
+            self.cost_value_norm = (
+                RunningValueNorm(shape=1, device=self.device)
+                if value_target_normalizer == "running"
+                else (
+                    PopArtValueNorm(shape=1, device=self.device)
+                    if value_target_normalizer == "popart"
+                    else None
+                )
+            )
+            cost_layers = [
+                self.obs_norm,
+                nn.Linear(self.obs_dim, hidden_layers_size),
+                _activation(activation_function),
+            ]
+            for _ in range(value_hidden_layers):
+                cost_layers.extend(
+                    [
+                        nn.Linear(hidden_layers_size, hidden_layers_size),
+                        _activation(activation_function),
+                    ]
+                )
+            cost_layers.append(nn.Linear(hidden_layers_size, 1))
+            cost_trunk = nn.Sequential(*cost_layers).to(self.device)
+            cost_net = (
+                cost_trunk
+                if self.cost_value_norm is None
+                else DenormalizedValueHead(cost_trunk, self.cost_value_norm).to(
+                    self.device
+                )
+            )
+            self.cost_value_module = ValueOperator(
+                module=cost_net, in_keys=in_keys, out_keys=["cost_value"]
+            )
+            self.cost_advantage_module = GAE(
+                gamma=gamma,
+                lmbda=lmbda,
+                value_network=self.cost_value_module,
+                # NOT averaged: normalising the cost advantage would destroy
+                # its scale relative to the multiplier, and the multiplier is
+                # what the constraint is expressed in.
+                average_gae=False,
+                device=self.device,
+            )
+            self.cost_advantage_module.set_keys(
+                reward="cost",
+                value="cost_value",
+                advantage="cost_advantage",
+                value_target="cost_value_target",
+            )
+            self.lagrange = LagrangeMultiplier(
+                cost_limit=cost_limit,
+                lr=lagrange_lr,
+                init_value=lagrange_init,
+                max_value=lagrange_max,
+            ).to(self.device)
+
         # Losses
         self.advantage_module = GAE(
             gamma=gamma,
@@ -173,7 +243,12 @@ class PPO(Algorithm):
             critic_coeff=0.0 if self.value_norm is not None else 1.0,
             loss_critic_type="smooth_l1",
         )
-        self.optim = torch.optim.Adam(self.loss_module.parameters(), lr)
+        params = list(self.loss_module.parameters())
+        if self.cost_value_module is not None:
+            # The cost critic is not part of ClipPPOLoss, so its parameters
+            # have to be added explicitly or it would never train.
+            params += list(self.cost_value_module.parameters())
+        self.optim = torch.optim.Adam(params, lr)
         self.scheduler = None
         self.replay_buffer = None
 
@@ -203,21 +278,47 @@ class PPO(Algorithm):
 
         frames_per_batch = batch.numel()
         logs = {}
+
+        if self.lagrange is not None:
+            # Dual ascent once per batch, on the mean per-step cost actually
+            # observed. Done BEFORE the epochs so every minibatch this round is
+            # weighted by the same multiplier -- updating it inside the inner
+            # loop would change the objective underneath the importance ratios.
+            mean_cost = batch["next", "cost"].mean().item()
+            logs["cost"] = mean_cost
+            logs["lagrange"] = self.lagrange.update(mean_cost)
+            logs["cost_violation"] = mean_cost - self.lagrange.cost_limit
+
         for epoch in range(self.num_epochs):
             # The advantage is recomputed each epoch because it depends on the
             # value network, which the inner loop is updating.
             with torch.no_grad():
                 self.advantage_module(batch)
+                if self.cost_advantage_module is not None:
+                    self.cost_advantage_module(batch)
+                    # Overwrite "advantage" with the Lagrangian combination, so
+                    # ClipPPOLoss -- which uses the key if it is already
+                    # present -- optimises the constrained objective without
+                    # needing a second surrogate.
+                    batch["advantage"] = self.lagrange.combine(
+                        batch["advantage"], batch["cost_advantage"]
+                    )
 
             if self.value_norm is not None and epoch == 0:
                 # Fold this batch's targets into the running value stats once
                 # per batch -- doing it every epoch would count the same
                 # (highly correlated) returns ``num_epochs`` times over.
                 self.value_norm.update(batch["value_target"])
+            if self.cost_value_norm is not None and epoch == 0:
+                self.cost_value_norm.update(batch["cost_value_target"])
 
             self.replay_buffer.extend(batch.reshape(-1))
             for _ in range(frames_per_batch // self.sub_batch_size):
-                logs = self._optim_step(self.replay_buffer.sample(self.sub_batch_size))
+                # update(), not assignment: entries set before the epoch loop
+                # (cost, lagrange) must survive it.
+                logs.update(
+                    self._optim_step(self.replay_buffer.sample(self.sub_batch_size))
+                )
 
         # Refresh the observation stats after the epochs
         self.obs_norm.update(batch["observation"])
@@ -257,19 +358,40 @@ class PPO(Algorithm):
             loss_value = loss_value + self.critic_coeff * loss_critic
             logs["loss_critic"] = loss_critic.item()
 
+        if self.cost_value_module is not None:
+            # Cost critic, regressed exactly like the reward critic
+            self.cost_value_module(subdata)
+            pred, target = subdata["cost_value"], subdata["cost_value_target"]
+            if self.cost_value_norm is not None:
+                pred = self.cost_value_norm.normalize(pred)
+                target = self.cost_value_norm.normalize(target)
+            loss_cost_critic = F.smooth_l1_loss(pred, target)
+            loss_value = loss_value + self.critic_coeff * loss_cost_critic
+            logs["loss_cost_critic"] = loss_cost_critic.item()
+
         loss_value.backward()
         # Good practice to keep the gradient norm bounded.
-        nn.utils.clip_grad_norm_(self.loss_module.parameters(), self.max_grad_norm)
+        nn.utils.clip_grad_norm_(self._trainable_params(), self.max_grad_norm)
         self.optim.step()
         self.optim.zero_grad(set_to_none=True)
         return logs
+
+    def _trainable_params(self):
+        params = list(self.loss_module.parameters())
+        if self.cost_value_module is not None:
+            params += list(self.cost_value_module.parameters())
+        return params
 
     def on_iteration_end(self):
         if self.scheduler is not None:
             self.scheduler.step()
 
     def summary(self):
-        return {"policy_std": self.policy_std}
+        fields = {"policy_std": self.policy_std}
+        if self.lagrange is not None:
+            fields["constraints"] = self.constraints
+            fields["cost_limit"] = self.lagrange.cost_limit
+        return fields
 
     def checkpoint_objects(self):
         objects = {
@@ -279,4 +401,7 @@ class PPO(Algorithm):
         }
         if self.scheduler is not None:
             objects["scheduler"] = self.scheduler
+        if self.cost_value_module is not None:
+            objects["cost_value"] = self.cost_value_module
+            objects["lagrange"] = self.lagrange
         return objects

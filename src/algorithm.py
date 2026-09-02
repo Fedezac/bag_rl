@@ -15,16 +15,22 @@ class Algorithm(abc.ABC):
     and knows how to turn one collected batch into one round of updates
     """
 
-    def __init__(self, env_name, custom_reward_functions=None, device=None):
+    def __init__(
+        self, env_name, custom_reward_functions=None, constraints=None, device=None
+    ):
         self.env_name = env_name
         self.custom_reward_functions = custom_reward_functions
+        # Constraint spec (e.g. "tilt,height")
+        self.constraints = constraints
         self.device = (
             torch.device(device)
             if device is not None
             else (torch.device(0) if torch.cuda.is_available() else torch.device("cpu"))
         )
         self.obs_dim, self.action_spec = env_specs(
-            env_name, custom_reward_functions=custom_reward_functions
+            env_name,
+            custom_reward_functions=custom_reward_functions,
+            constraints=constraints,
         )
         self.action_dim = self.action_spec.shape[-1]
 
