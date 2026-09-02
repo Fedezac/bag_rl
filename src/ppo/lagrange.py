@@ -44,15 +44,18 @@ class LagrangeMultiplier(nn.Module):
     ``split_trajs=False``.
     """
 
-    def __init__(self, cost_limit, lr=0.035, init_value=0.0, max_value=None):
+    def __init__(
+        self, cost_limit, lr=0.035, init_value=0.0, max_value=None, floor=-5.0
+    ):
         super().__init__()
+        self._floor = floor
         # ``init_value`` is the initial MULTIPLIER, not the raw parameter, so
         # it has to be pushed through the inverse of softplus. Passing it
         # straight in would make init_value=0.0 mean lambda=softplus(0)=0.69 --
         # a run asked to start unconstrained would start with real constraint
         # pressure instead. log(exp(0) - 1) is -inf, so the floor stands in for
         # "effectively zero".
-        self.nu = nn.Parameter(torch.tensor(_inverse_softplus(init_value)))
+        self.nu = nn.Parameter(torch.tensor(_inverse_softplus(init_value, floor)))
         self.cost_limit = float(cost_limit)
         self.max_value = max_value
         self.optim = torch.optim.Adam([self.nu], lr=lr)
@@ -66,7 +69,7 @@ class LagrangeMultiplier(nn.Module):
         return lam
 
     def update(self, mean_cost):
-        """One dual-ascent step on the observed mean per-step cost.
+        """One dual-ascent step on the observed mean per-step cost. Multiplier update.
 
         Minimising ``-lambda * (J_c - d)`` with respect to ``nu`` raises the
         multiplier while the constraint is violated (``J_c > d``) and lets it
@@ -76,10 +79,15 @@ class LagrangeMultiplier(nn.Module):
         self.optim.zero_grad(set_to_none=True)
         loss.backward()
         self.optim.step()
+        # Projected gradient, not free descent. Without this floor the
+        # multiplier decays without bound through the long opening stretch
+        # where the policy is still too incompetent to violate the constraint
+        with torch.no_grad():
+            self.nu.clamp_(min=self._floor)
         return float(self.value.detach())
 
     def combine(self, reward_advantage, cost_advantage):
-        """Fold the cost advantage into the reward advantage.
+        """Fold the cost advantage into the reward advantage. Reward update.
 
         ``(A_r - lambda * A_c) / (1 + lambda)`` -- the standard Lagrangian
         surrogate. The division keeps the advantage scale roughly constant as
