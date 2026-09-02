@@ -4,3 +4,4 @@ videos/
 *.log
 *.txt
 __pycache__
+ckpt/
