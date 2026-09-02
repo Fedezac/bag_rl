@@ -6,6 +6,7 @@ own process rather than receiving a live env object.
 """
 
 import copy
+import inspect
 from functools import partial
 
 from torchrl.envs import (
@@ -25,7 +26,7 @@ from src.env.constraints import build_cost_transform
 from src.env.rewards import REWARD_SHAPERS
 
 
-def build_reward_transform(spec):
+def build_reward_transform(env_name, spec):
     """Turn a shaping spec into a *fresh* transform instance, or ``None``.
 
     Accepts a name from :data:`REWARD_SHAPERS`, a transform class, a zero-arg
@@ -36,11 +37,18 @@ def build_reward_transform(spec):
     """
     if spec is None:
         return None
-    if isinstance(spec, str):
-        return REWARD_SHAPERS[spec]()
     if isinstance(spec, Transform):
         return copy.deepcopy(spec)
-    return spec()
+    factory = REWARD_SHAPERS[spec] if isinstance(spec, str) else spec
+    # Layout-driven shapers need to know WHICH robot they are reading. Without
+    # this the name path built them with their default env_name, so e.g.
+    # `--shaping gait` on Walker2d silently used Ant's offsets and indexed past
+    # the end of a 17-wide observation.
+    try:
+        accepts_env = "env_name" in inspect.signature(factory).parameters
+    except (TypeError, ValueError):
+        accepts_env = False
+    return factory(env_name=env_name) if accepts_env else factory()
 
 
 def make_single_env(
@@ -52,7 +60,7 @@ def make_single_env(
 ):
     """Build one gym env. Observations stay *raw* -- the networks normalise."""
     transforms = []
-    shaper = build_reward_transform(custom_reward_functions)
+    shaper = build_reward_transform(env_name, custom_reward_functions)
     if shaper is not None:
         transforms.append(shaper)
     # Costs are read off the same observation the shaper sees, and are written

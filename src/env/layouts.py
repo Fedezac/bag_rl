@@ -75,6 +75,36 @@ class ObservationLayout:
             return torch.zeros_like(obs[..., 0])
         return obs[..., self.angular_velocity[0] + 2]
 
+    def body_twist(self, obs):
+        """Twist in the body frame at the CoM: ``(vx, vy, wz)``.
+
+        A twist command is body-fixed -- "forward at 1 m/s" means along the
+        robot's own heading,
+        """
+        lo = self.linear_velocity[0]
+        alo = self.angular_velocity[0]
+        if self.quaternion is None:
+            # Planar robot: one pitch angle, and no yaw degree of freedom
+            th = obs[..., self.pitch]
+            c, s = torch.cos(th), torch.sin(th)
+            vx, vz = obs[..., lo], obs[..., lo + 1]
+            return c * vx + s * vz, torch.zeros_like(vx), torch.zeros_like(vx)
+
+        qlo = self.quaternion[0]
+        w = obs[..., qlo]
+        x, y, z = obs[..., qlo + 1], obs[..., qlo + 2], obs[..., qlo + 3]
+        vx, vy, vz = obs[..., lo], obs[..., lo + 1], obs[..., lo + 2]
+        wx, wy, wz = obs[..., alo], obs[..., alo + 1], obs[..., alo + 2]
+
+        r00, r10, r20 = 1 - 2 * (y * y + z * z), 2 * (x * y + w * z), 2 * (x * z - w * y)
+        r01, r11, r21 = 2 * (x * y - w * z), 1 - 2 * (x * x + z * z), 2 * (y * z + w * x)
+        r02, r12, r22 = 2 * (x * z + w * y), 2 * (y * z - w * x), 1 - 2 * (x * x + y * y)
+
+        vx_b = r00 * vx + r10 * vy + r20 * vz
+        vy_b = r01 * vx + r11 * vy + r21 * vz
+        wz_b = r02 * wx + r12 * wy + r22 * wz
+        return vx_b, vy_b, wz_b
+
     def joint_velocities(self, obs):
         lo, hi = self.joint_velocity
         return obs[..., lo:hi]

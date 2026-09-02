@@ -3,6 +3,7 @@
 
 import argparse
 import sys
+from functools import partial
 from pathlib import Path
 
 # In order to have this file run both as python main.py and python -m main.py
@@ -12,7 +13,11 @@ import torch  # noqa: E402
 from torch import multiprocessing  # noqa: E402
 
 from src.env.constraints import CONSTRAINT_TERMS  # noqa: E402
-from src.env.rewards import REWARD_SHAPERS  # noqa: E402
+from src.env.rewards import (  # noqa: E402
+    REWARD_SHAPERS,
+    TwistTrackingReward,
+    gait_twist,
+)
 from src.ppo import PPO  # noqa: E402
 from src.trainer import Trainer  # noqa: E402
 
@@ -52,6 +57,39 @@ def parse_args():
             "reward-shaping term to add. Env-specific: 'ant_gait' expects "
             "Ant-v5, 'humanoid_upright' expects Humanoid-v5. Off by default, "
             "so the true task reward is used."
+        ),
+    )
+    p.add_argument(
+        "--twist",
+        default="1.0,0,0",
+        help=(
+            "desired body-frame twist at the CoM as 'vx,vy,wz' (m/s, m/s, "
+            "rad/s), used by --shaping twist. Body-fixed: vx is forward along "
+            "the robot's own heading, not world +x. Use --twist=-1,0,0 (equals "
+            "sign) for a negative component."
+        ),
+    )
+    p.add_argument(
+        "--twist-range",
+        default=None,
+        help=(
+            "randomise the twist per episode, as 'vxlo:vxhi,vylo:vyhi,wzlo:wzhi'. "
+            "Use an EQUALS sign when any bound is negative, or argparse reads "
+            "the value as a flag: --twist-range=-0.5:1.5,-0.5:0.5,-1:1 . "
+            "The command is appended to the "
+            "observation, so the policy can learn to follow ANY twist in the "
+            "range rather than the single one it was trained on. Without this "
+            "the command is fixed at --twist."
+        ),
+    )
+    p.add_argument(
+        "--gait-weight",
+        type=float,
+        default=0.5,
+        help=(
+            "weight of the gait-quality terms in --shaping gait_twist. The "
+            "twist tracking term is fixed at 1.0, so this sets how much clean "
+            "footfall is worth relative to following the command."
         ),
     )
     p.add_argument(
@@ -169,10 +207,34 @@ def main():
     if args.seed is not None:
         torch.manual_seed(args.seed)
 
+    # A twist shaper needs the robot's layout and the command bound in. Passed
+    # as a partial rather than a name so it stays picklable for the collector
+    # workers, which re-create their envs in their own processes.
+    shaping = args.shaping
+    if shaping in ("twist", "gait_twist"):
+        vx, vy, wz = (float(v) for v in args.twist.split(","))
+        ranges = None
+        if args.twist_range:
+            ranges = tuple(
+                tuple(float(x) for x in part.split(":"))
+                for part in args.twist_range.split(",")
+            )
+            if len(ranges) != 3 or any(len(r) != 2 for r in ranges):
+                raise SystemExit(
+                    "--twist-range needs three lo:hi pairs, e.g. "
+                    "'-0.5:1.5,-0.5:0.5,-1:1'"
+                )
+        kw = dict(env_name=args.env_name, vx=vx, vy=vy, wz=wz, command_ranges=ranges)
+        shaping = (
+            partial(gait_twist, w_gait=args.gait_weight, **kw)
+            if shaping == "gait_twist"
+            else partial(TwistTrackingReward, **kw)
+        )
+
     algorithm = PPO(
         args.env_name,
         hidden_layers_size=args.num_cells,
-        custom_reward_functions=args.shaping,
+        custom_reward_functions=shaping,
         normalized_observation_clip=args.obs_clip,
         observations_warmup_steps=args.obs_warmup,
         value_target_normalizer=args.value_norm,

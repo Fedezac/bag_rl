@@ -14,6 +14,14 @@ from tqdm import tqdm
 from src.env.utils import make_batched_env, make_single_env
 
 
+def _spec_name(spec):
+    """Readable name for a shaping spec that may be a string or a partial."""
+    if spec is None or isinstance(spec, str):
+        return spec
+    func = getattr(spec, "func", spec)
+    return getattr(func, "__name__", type(func).__name__)
+
+
 class Trainer:
     """Drives an :class:`~src.algorithm.Algorithm` against a parallel collector.
 
@@ -326,7 +334,7 @@ class Trainer:
         scale = self.logs["policy_scale"]
         fields = {
             "env": self.env_name,
-            "shaping": self.custom_reward_functions,
+            "shaping": _spec_name(self.custom_reward_functions),
             **self.algorithm.summary(),
             "seed": self.seed,
             "train_reward_last10": f"{sum(tail) / len(tail):.4f}",
