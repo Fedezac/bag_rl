@@ -1,3 +1,6 @@
 .vscode/
 csv_logs/
 videos/
+*.log
+*.txt
+__pycache__
