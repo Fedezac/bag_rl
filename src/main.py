@@ -79,6 +79,14 @@ def parse_args():
         "--eval-every", type=int, default=5, help="iterations between evals; 0 disables"
     )
     p.add_argument(
+        "--eval-episodes",
+        type=int,
+        default=1,
+        help=(
+            "rollouts averaged per eval."
+        ),
+    )
+    p.add_argument(
         "--render-every",
         type=int,
         default=5,
@@ -131,6 +139,7 @@ def main():
         frames_per_batch=args.frames_per_batch,
         total_frames=args.total_frames,
         eval_every=args.eval_every,
+        eval_episodes=args.eval_episodes,
         render_every=args.render_every,
         video_folder=args.video_folder,
         seed=args.seed,

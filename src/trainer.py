@@ -1,5 +1,6 @@
 """Training harness: collection, evaluation, rendering, logging."""
 
+import statistics
 from collections import defaultdict
 from functools import partial
 
@@ -33,6 +34,7 @@ class Trainer:
         total_frames=204_800,
         eval_every=5,
         eval_steps=1000,
+        eval_episodes=1,
         render_every=5,
         render_steps=500,
         video_folder="./videos",
@@ -61,6 +63,7 @@ class Trainer:
 
         self.eval_every = eval_every
         self.eval_steps = eval_steps
+        self.eval_episodes = eval_episodes
         self.render_every = render_every
         self.render_steps = render_steps
         self.video_folder = video_folder
@@ -71,6 +74,9 @@ class Trainer:
         # 'task_reward'; log THAT so curves stay comparable across variants.
         self.reward_key = (
             "task_reward" if self.custom_reward_functions is not None else "reward"
+        )
+        self.shaped_key = (
+            "reward" if self.custom_reward_functions is not None else None
         )
 
         self.logs = defaultdict(list)
@@ -172,6 +178,10 @@ class Trainer:
                 self.collector.update_policy_weights_()
 
                 self.logs["reward"].append(batch["next", self.reward_key].mean().item())
+                if self.shaped_key is not None:
+                    self.logs["shaped_reward"].append(
+                        batch["next", self.shaped_key].mean().item()
+                    )
                 self.logs["step_count"].append(batch["step_count"].max().item())
 
                 if self.eval_every and i % self.eval_every == 0:
@@ -188,19 +198,28 @@ class Trainer:
         return self.logs
 
     def evaluate(self):
-        """Roll the policy out without exploration and log the return."""
-        # Execute the policy without exploration for a given
-        # number of steps -- ``eval_steps``, the env horizon.
+        """Roll the policy out without exploration and log
+        """
+        returns, shaped, per_step, steps = [], [], [], []
         with set_exploration_type(ExplorationType.DETERMINISTIC), torch.no_grad():
-            rollout = self.eval_env.rollout(self.eval_steps, self.algorithm.policy)
-            self.logs["eval reward"].append(
-                rollout["next", self.reward_key].mean().item()
-            )
-            self.logs["eval reward (sum)"].append(
-                rollout["next", self.reward_key].sum().item()
-            )
-            self.logs["eval step_count"].append(rollout["step_count"].max().item())
-            del rollout
+            for _ in range(self.eval_episodes):
+                rollout = self.eval_env.rollout(self.eval_steps, self.algorithm.policy)
+                returns.append(rollout["next", self.reward_key].sum().item())
+                per_step.append(rollout["next", self.reward_key].mean().item())
+                if self.shaped_key is not None:
+                    shaped.append(rollout["next", self.shaped_key].sum().item())
+                steps.append(rollout["step_count"].max().item())
+                del rollout
+
+        self.logs["eval reward"].append(statistics.fmean(per_step))
+        self.logs["eval reward (sum)"].append(statistics.fmean(returns))
+        # Spread across episodes, so a curve can be read against its own noise.
+        self.logs["eval reward (sd)"].append(
+            statistics.stdev(returns) if len(returns) > 1 else 0.0
+        )
+        if shaped:
+            self.logs["eval shaped (sum)"].append(statistics.fmean(shaped))
+        self.logs["eval step_count"].append(max(steps))
 
     def render(self):
         """Record one greedy episode into the training video."""
@@ -234,6 +253,7 @@ class Trainer:
         if self.logs["eval reward (sum)"]:
             parts.append(
                 f"eval cumulative reward: {self.logs['eval reward (sum)'][-1]: 4.4f} "
+                f"+/- {self.logs['eval reward (sd)'][-1]:.1f} "
                 f"(init: {self.logs['eval reward (sum)'][0]: 4.4f}), "
                 f"eval step-count: {self.logs['eval step_count'][-1]}"
             )
@@ -241,6 +261,11 @@ class Trainer:
             parts.append(
                 f"average reward={self.logs['reward'][-1]: 4.4f} "
                 f"(init={self.logs['reward'][0]: 4.4f})"
+            )
+        if self.logs["shaped_reward"]:
+            parts.append(
+                f"shaped={self.logs['shaped_reward'][-1]: 4.4f} "
+                f"(init={self.logs['shaped_reward'][0]: 4.4f})"
             )
         if self.logs["step_count"]:
             parts.append(f"step count (max): {self.logs['step_count'][-1]}")
@@ -256,7 +281,9 @@ class Trainer:
     def result_line(self):
         """Compact machine-readable summary, for sweeps / A-B comparisons."""
         evals = self.logs["eval reward (sum)"]
+        shaped_evals = self.logs["eval shaped (sum)"]
         tail = self.logs["reward"][-10:] or [float("nan")]
+        shaped_tail = self.logs["shaped_reward"][-10:] or [float("nan")]
         scale = self.logs["policy_scale"]
         fields = {
             "env": self.env_name,
@@ -264,8 +291,22 @@ class Trainer:
             **self.algorithm.summary(),
             "seed": self.seed,
             "train_reward_last10": f"{sum(tail) / len(tail):.4f}",
+            # The shaped objective PPO is actually maximising. Without it a
+            # falling task-reward curve is uninterpretable.
+            "train_shaped_last10": f"{sum(shaped_tail) / len(shaped_tail):.4f}",
             "eval_return_final": f"{evals[-1] if evals else float('nan'):.4f}",
             "eval_return_best": f"{max(evals) if evals else float('nan'):.4f}",
+            "eval_return_sd": (
+                f"{self.logs['eval reward (sd)'][-1]:.4f}"
+                if self.logs["eval reward (sd)"]
+                else float("nan")
+            ),
+            "eval_shaped_final": (
+                f"{shaped_evals[-1]:.4f}" if shaped_evals else float("nan")
+            ),
+            "eval_shaped_best": (
+                f"{max(shaped_evals):.4f}" if shaped_evals else float("nan")
+            ),
             "eval_steps_final": (
                 self.logs["eval step_count"][-1] if self.logs["eval step_count"] else -1
             ),
@@ -279,11 +320,16 @@ class Trainer:
 
         plt.figure(figsize=(10, 10))
         panels = [
-            ("reward", "training rewards (average)"),
+            ("reward", "training task reward (average)"),
             ("step_count", "Max step count (training)"),
-            ("eval reward (sum)", "Return (test)"),
+            ("eval reward (sum)", "Task return (test)"),
             ("eval step_count", "Max step count (test)"),
         ]
+        if self.logs["shaped_reward"]:
+            # With shaping on, the two objectives can move in opposite
+            # directions
+            panels[1] = ("shaped_reward", "training shaped reward (average)")
+            panels[3] = ("eval shaped (sum)", "Shaped return (test)")
         for idx, (key, title) in enumerate(panels, start=1):
             plt.subplot(2, 2, idx)
             plt.plot(self.logs[key])
