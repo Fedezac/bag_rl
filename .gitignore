@@ -5,3 +5,5 @@ videos/
 *.txt
 __pycache__
 ckpt/
+TODO.*
+todo.*
