@@ -30,8 +30,7 @@ class RewardShapingBase(Transform):
         raise NotImplementedError
 
     def after_step(self, next_tensordict):
-        """Hook for shapers that also modify the observation, run post-reward.
-        """
+        """Hook for shapers that also modify the observation, run post-reward."""
         return next_tensordict
 
     def _step(self, tensordict, next_tensordict):
@@ -166,9 +165,9 @@ class GaitReward(RewardShapingBase):
         sync = torch.stack(syncs, dim=-1).mean(-1)
 
         if len(groups) == 2:
-            antiphase = (
-                contact[..., groups[0][0]] != contact[..., groups[1][0]]
-            ).to(dtype)
+            antiphase = (contact[..., groups[0][0]] != contact[..., groups[1][0]]).to(
+                dtype
+            )
             phase = 0.5 * sync + 0.5 * antiphase
         else:
             # Antiphase is only well defined between two groups; with more, the
@@ -185,7 +184,7 @@ class GaitReward(RewardShapingBase):
 
     def terms(self, obs):
         """Individual reward terms, kept separate so they can be logged.
-        
+
         Velocities stay in the WORLD frame here, as they were, so the numbers
         this produces are identical to the runs already recorded against it.
         """
@@ -285,12 +284,13 @@ class TwistTrackingReward(RewardShapingBase):
         self.command = lo + (hi - lo) * torch.rand(self.COMMAND_DIM)
 
     def _append_command(self, tensordict):
-        """Concatenate the command onto the observation.
-        """
+        """Concatenate the command onto the observation."""
         obs = tensordict["observation"]
         if obs.shape[-1] != self.base_obs_dim:
             return tensordict
-        cmd = self.command.to(obs.device, obs.dtype).expand(*obs.shape[:-1], self.COMMAND_DIM)
+        cmd = self.command.to(obs.device, obs.dtype).expand(
+            *obs.shape[:-1], self.COMMAND_DIM
+        )
         tensordict["observation"] = torch.cat([obs, cmd], dim=-1)
         return tensordict
 
@@ -348,9 +348,7 @@ class CompositeReward(RewardShapingBase):
         super().__init__()
         # (weight, shaper) pairs; a bare shaper is weight 1.0.
         self.members = [m if isinstance(m, tuple) else (1.0, m) for m in members]
-        self.replaces_task_reward = any(
-            s.replaces_task_reward for _, s in self.members
-        )
+        self.replaces_task_reward = any(s.replaces_task_reward for _, s in self.members)
 
     def shaping(self, tensordict, next_tensordict):
         total = None
@@ -375,13 +373,52 @@ class CompositeReward(RewardShapingBase):
         return observation_spec
 
 
+class TrackingGatedGait(RewardShapingBase):
+    """Twist tracking, with gait quality as a bonus GATED on the tracking"""
+
+    replaces_task_reward = True
+
+    def __init__(self, env_name="Ant-v5", w_gait=0.5, **twist_kwargs):
+        super().__init__()
+        self.twist = TwistTrackingReward(env_name=env_name, **twist_kwargs)
+        # Speed / lateral / yaw are the twist term's job; leaving them on would
+        # be scoring the same quantity twice with two different kernels.
+        self.gait = GaitReward(env_name=env_name, w_speed=0.0, w_lateral=0.0, w_yaw=0.0)
+        self.w_gait = w_gait
+        # Normalises the gate to [0, 1] so w_gait keeps its meaning: the value
+        # of a perfect gait relative to perfect tracking.
+        self.track_max = self.twist.w_lin + self.twist.w_ang
+
+    def shaping(self, tensordict, next_tensordict):
+        track = self.twist.shaping(tensordict, next_tensordict)
+        gait = self.gait.shaping(tensordict, next_tensordict)
+        return track + self.w_gait * (track / self.track_max) * gait
+
+    # The command plumbing is the twist shaper's; the gait term is stateless.
+    def after_step(self, next_tensordict):
+        return self.twist.after_step(next_tensordict)
+
+    def _reset(self, tensordict, tensordict_reset):
+        return self.twist._reset(tensordict, tensordict_reset)
+
+    def transform_observation_spec(self, observation_spec):
+        return self.twist.transform_observation_spec(observation_spec)
+
+
 def gait_twist(env_name="Ant-v5", w_gait=0.5, **twist_kwargs):
-    """Track a commanded twist while keeping a clean gait.
-    """
+    """Track a commanded twist while keeping a clean gait."""
+    return TrackingGatedGait(env_name=env_name, w_gait=w_gait, **twist_kwargs)
+
+
+def gait_twist_sum(env_name="Ant-v5", w_gait=0.5, **twist_kwargs):
+    """The additive predecessor of :func:`gait_twist`"""
     return CompositeReward(
         [
             (1.0, TwistTrackingReward(env_name=env_name, **twist_kwargs)),
-            (w_gait, GaitReward(env_name=env_name, w_speed=0.0, w_lateral=0.0, w_yaw=0.0)),
+            (
+                w_gait,
+                GaitReward(env_name=env_name, w_speed=0.0, w_lateral=0.0, w_yaw=0.0),
+            ),
         ]
     )
 
@@ -394,4 +431,5 @@ REWARD_SHAPERS = {
     "humanoid_upright": HumanoidUprightReward,
     "twist": TwistTrackingReward,
     "gait_twist": gait_twist,
+    "gait_twist_sum": gait_twist_sum,
 }

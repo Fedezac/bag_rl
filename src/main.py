@@ -17,6 +17,7 @@ from src.env.rewards import (  # noqa: E402
     REWARD_SHAPERS,
     TwistTrackingReward,
     gait_twist,
+    gait_twist_sum,
 )
 from src.ppo import PPO  # noqa: E402
 from src.trainer import Trainer  # noqa: E402
@@ -211,7 +212,7 @@ def main():
     # as a partial rather than a name so it stays picklable for the collector
     # workers, which re-create their envs in their own processes.
     shaping = args.shaping
-    if shaping in ("twist", "gait_twist"):
+    if shaping in ("twist", "gait_twist", "gait_twist_sum"):
         vx, vy, wz = (float(v) for v in args.twist.split(","))
         ranges = None
         if args.twist_range:
@@ -225,11 +226,12 @@ def main():
                     "'-0.5:1.5,-0.5:0.5,-1:1'"
                 )
         kw = dict(env_name=args.env_name, vx=vx, vy=vy, wz=wz, command_ranges=ranges)
-        shaping = (
-            partial(gait_twist, w_gait=args.gait_weight, **kw)
-            if shaping == "gait_twist"
-            else partial(TwistTrackingReward, **kw)
-        )
+        if shaping == "gait_twist":
+            shaping = partial(gait_twist, w_gait=args.gait_weight, **kw)
+        elif shaping == "gait_twist_sum":
+            shaping = partial(gait_twist_sum, w_gait=args.gait_weight, **kw)
+        else:
+            shaping = partial(TwistTrackingReward, **kw)
 
     algorithm = PPO(
         args.env_name,

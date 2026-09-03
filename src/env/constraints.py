@@ -127,6 +127,23 @@ class OverSpeedCost(ConstraintTerm):
         return (layout.forward_velocity(obs) - self.max_speed).clamp_min(0.0)
 
 
+class FlightPhaseCost(ConstraintTerm):
+    """No foot carrying load -- the robot is airborne"""
+
+    name = "flight_phase"
+
+    def __init__(self, threshold=0.3):
+        self.threshold = threshold
+
+    def cost(self, layout, obs, action):
+        forces = layout.foot_forces(obs)
+        if forces is None:
+            # Planar walkers carry no cfrc_ext
+            return torch.zeros_like(obs[..., 0])
+        airborne = forces.max(dim=-1).values <= self.threshold
+        return airborne.to(obs.dtype)
+
+
 class ActionMagnitudeCost(ConstraintTerm):
     """Actuation beyond ``limit`` of the available range.
 
@@ -153,6 +170,7 @@ CONSTRAINT_TERMS = {
         NonFootContactCost,
         JointVelocityCost,
         OverSpeedCost,
+        FlightPhaseCost,
         ActionMagnitudeCost,
     )
 }

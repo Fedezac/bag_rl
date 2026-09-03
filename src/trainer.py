@@ -1,12 +1,12 @@
 """Training harness: collection, evaluation, rendering, logging."""
 
+import json
 import statistics
 from collections import defaultdict
 from functools import partial
 from pathlib import Path
 
 import torch
-from tensordict import TensorDict
 from torchrl.collectors import MultiSyncCollector
 from torchrl.envs.utils import ExplorationType, set_exploration_type
 from tqdm import tqdm
@@ -93,9 +93,7 @@ class Trainer:
         self.reward_key = (
             "task_reward" if self.custom_reward_functions is not None else "reward"
         )
-        self.shaped_key = (
-            "reward" if self.custom_reward_functions is not None else None
-        )
+        self.shaped_key = "reward" if self.custom_reward_functions is not None else None
 
         self.logs = defaultdict(list)
         self.collector = None
@@ -147,14 +145,17 @@ class Trainer:
 
         if self.render_every:
             # Imported lazily
-            import gymnasium as gym
             import imageio
-            from gymnasium.wrappers import RecordVideo
 
-            self.render_env = RecordVideo(
-                gym.make(self.env_name, render_mode="rgb_array"),
-                video_folder=self.video_folder,
+            # Same pipeline as eval env
+            self.render_env = make_single_env(
+                self.env_name,
+                self.device,
+                custom_reward_functions=self.custom_reward_functions,
+                constraints=self.constraints,
+                render_mode="rgb_array",
             )
+            Path(self.video_folder).mkdir(parents=True, exist_ok=True)
             self.video_writer = imageio.get_writer(
                 f"{self.video_folder}/training_full.mp4", fps=30
             )
@@ -218,8 +219,7 @@ class Trainer:
         return self.logs
 
     def evaluate(self):
-        """Roll the policy out without exploration and log
-        """
+        """Roll the policy out without exploration and log"""
         returns, shaped, per_step, steps, costs = [], [], [], [], []
         with set_exploration_type(ExplorationType.DETERMINISTIC), torch.no_grad():
             for _ in range(self.eval_episodes):
@@ -249,8 +249,7 @@ class Trainer:
         self._maybe_checkpoint()
 
     def _maybe_checkpoint(self):
-        """Save the latest policy, and separately the best one seen so far
-        """
+        """Save the latest policy, and separately the best one seen so far"""
         if self.checkpoint_dir is None:
             return
         import torch as _torch
@@ -258,34 +257,29 @@ class Trainer:
         state = self.algorithm.state_dict()
         _torch.save(state, self.checkpoint_dir / "final.pt")
 
-        current = self.logs["eval reward (sum)"][-1]
+        # Score on the objective the policy is actually maximising
+        current = self.logs[
+            "eval shaped (sum)" if self.shaped_key else "eval reward (sum)"
+        ][-1]
         if self._best_eval is None or current > self._best_eval:
             self._best_eval = current
             _torch.save(state, self.checkpoint_dir / "best.pt")
 
+        # The curves, alongside the weights
+        (self.checkpoint_dir / "logs.json").write_text(
+            json.dumps({k: list(v) for k, v in self.logs.items()})
+        )
+
     def render(self):
         """Record one greedy episode into the training video."""
-        obs, _ = self.render_env.reset()
-        with torch.no_grad():
-            for _ in range(self.render_steps):
-                # Observations are fed in raw
-                td = TensorDict(
-                    {
-                        "observation": torch.as_tensor(
-                            obs, dtype=torch.float32, device=self.device
-                        ).unsqueeze(0)
-                    },
-                    batch_size=[1],
-                )
-                action = self.algorithm.policy(td)["loc"].squeeze(0).cpu().numpy()
 
-                frame = self.render_env.render()
-                if self.video_writer is not None:
-                    self.video_writer.append_data(frame)
+        def grab(env, _td):
+            self.video_writer.append_data(env.render())
 
-                obs, _, terminated, truncated, _ = self.render_env.step(action)
-                if terminated or truncated:
-                    break
+        with set_exploration_type(ExplorationType.DETERMINISTIC), torch.no_grad():
+            self.render_env.rollout(
+                self.render_steps, self.algorithm.policy, callback=grab
+            )
 
     # -- reporting -----------------------------------------------------------
 
