@@ -73,3 +73,27 @@ class Algorithm(abc.ABC):
             raise KeyError(f"checkpoint is missing {sorted(missing)}")
         for name, obj in objects.items():
             obj.load_state_dict(state_dict[name])
+
+    def load_pretrained(self, state_dict, skip=("optim", "scheduler")):
+        """Load the networks from a checkpoint, leaving the optimiser fresh.
+
+        Fine-tuning runs a new schedule against a new objective, so the saved
+        optimiser state is not what the new run wants -- and its param groups
+        differ outright whenever one of the two has a cost critic.
+
+        Anything the checkpoint does not carry is left at its fresh
+        initialisation rather than raising, so a policy trained without
+        constraints can seed a constrained run. Returns
+        ``(loaded, initialised)``.
+        """
+        objects = {
+            k: v for k, v in self.checkpoint_objects().items() if k not in skip
+        }
+        loaded, fresh = [], []
+        for name, obj in objects.items():
+            if name in state_dict:
+                obj.load_state_dict(state_dict[name])
+                loaded.append(name)
+            else:
+                fresh.append(name)
+        return loaded, fresh

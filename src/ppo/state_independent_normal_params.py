@@ -48,6 +48,16 @@ class StateIndependentNormalParams(nn.Module):
         )
         return loc, raw.clamp_min(self.min_std).expand(loc.shape)
 
+    def set_std(self, value):
+        """Put the scale back to ``value``, whatever it has decayed to."""
+        raw = (
+            math.log(math.expm1(value))
+            if self.parametrization == "softplus"
+            else math.log(value)
+        )
+        with torch.no_grad():
+            self.raw_std.fill_(raw)
+
     def _load_from_state_dict(self, state_dict, prefix, *args, **kwargs):
         # Checkpoints predating the softplus option store ``log_std``. Convert
         # rather than reject, so older policies stay loadable.

@@ -296,6 +296,27 @@ def parse_args():
         default=None,
         help="optional ceiling on the multiplier, to stop it swamping the reward",
     )
+    p.add_argument(
+        "--init-from",
+        default=None,
+        help=(
+            "checkpoint to seed the networks from (best.pt / final.pt). The "
+            "optimiser and LR schedule start fresh, so this is fine-tuning, "
+            "not resuming. The observation statistics come with the "
+            "checkpoint and carry its sample count, so they move slowly if "
+            "the new run's observation distribution differs."
+        ),
+    )
+    p.add_argument(
+        "--init-reset-std",
+        action="store_true",
+        help=(
+            "put the policy std back to --policy-init-std after loading. A "
+            "checkpoint carries the exploration it finished on, which is "
+            "usually collapsed; without this there is little left to explore "
+            "with. Recommended whenever the objective has changed."
+        ),
+    )
     p.add_argument("--seed", type=int, default=None)
     p.add_argument("--device", default=None, help="e.g. cuda:0 or cpu")
     p.add_argument("--no-plot", action="store_true")
@@ -377,6 +398,22 @@ def main():
         lagrange_max=args.lagrange_max,
         device=args.device,
     )
+    if args.init_from:
+        state = torch.load(
+            args.init_from, map_location=algorithm.device, weights_only=False
+        )
+        loaded, fresh = algorithm.load_pretrained(state)
+        note = f"init from {args.init_from}: loaded {', '.join(loaded)}"
+        if fresh:
+            note += f"; fresh {', '.join(fresh)}"
+        if args.init_reset_std:
+            note += (
+                f"; std reset to {args.policy_init_std}"
+                if algorithm.reset_policy_std()
+                else "; std is a network output, nothing to reset"
+            )
+        print(note)
+
     trainer = Trainer(
         algorithm,
         num_workers=args.num_workers,

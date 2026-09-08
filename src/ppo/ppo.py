@@ -123,6 +123,7 @@ class PPO(Algorithm):
         self.critic_coeff = critic_coeff
         self.max_grad_norm = max_grad_norm
         self.policy_std = policy_std
+        self.policy_init_std = policy_init_std
         self.lr_schedule = lr_schedule
 
         # First layer common to actor and value nets
@@ -289,6 +290,20 @@ class PPO(Algorithm):
         self.optim = torch.optim.Adam(params, lr)
         self.scheduler = None
         self.replay_buffer = None
+
+    def reset_policy_std(self, value=None):
+        """Restore the exploration scale to its initial value.
+
+        A checkpoint carries a decayed std along with the policy, so resuming
+        would continue with whatever exploration the previous run finished on.
+        Returns False when the std comes off the network output, where there
+        is no free parameter to reset.
+        """
+        for module in self.actor_net:
+            if isinstance(module, StateIndependentNormalParams):
+                module.set_std(self.policy_init_std if value is None else value)
+                return True
+        return False
 
     # -- Algorithm interface -------------------------------------------------
 
