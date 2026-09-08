@@ -237,12 +237,22 @@ class TwistTrackingReward(RewardShapingBase):
     observation's world-frame velocities have to be rotated to compare against
     it.
 
-    Both tracking terms are Gaussian kernels on the error, the standard
-    formulation for velocity-command locomotion
-    ``upright`` gates multiplicatively rather than adding, the same lesson
-    :class:`AntGaitReward` produced: as an additive term a flipped robot with a
-    good velocity trace scored the same as an upright one, because no single
-    term could outweigh the rest. Gated, tracking credit is unearnable while
+    Each axis gets its OWN Gaussian kernel on its own error. Sharing one kernel
+    between vx and vy couples their gradients: while vx is badly wrong the
+    shared exponential is near zero, and vy is invisible to the optimiser
+    regardless of its own error.
+
+    Each axis is scored against what standing still would earn for its own
+    command, so a stationary robot scores ~0 on any axis it is asked to move
+    and the reward measures progress rather than proximity. Without this,
+    per-axis kernels pay free credit whenever a command happens to be near
+    zero, and standing becomes a strong local optimum.
+
+    ``ang_sigma`` is wider than ``lin_sigma`` because yaw commands span the
+    widest range relative to what the robot can produce; a kernel sharp enough
+    for the linear axes leaves no yaw gradient at the far end of the range.
+
+    ``upright`` gates multiplicatively, so tracking credit is unearnable while
     inverted.
     """
 
@@ -258,9 +268,11 @@ class TwistTrackingReward(RewardShapingBase):
         wz=0.0,
         command_ranges=None,
         lin_sigma=0.25,
-        ang_sigma=0.25,
-        w_lin=1.0,
-        w_ang=0.5,
+        ang_sigma=0.4,
+        w_vx=1.0,
+        w_vy=1.0,
+        w_wz=1.0,
+        rest_eps=0.05,
     ):
         super().__init__()
         self.layout = get_layout(env_name)
@@ -268,8 +280,14 @@ class TwistTrackingReward(RewardShapingBase):
         self.command_ranges = command_ranges
         self.lin_sigma = lin_sigma
         self.ang_sigma = ang_sigma
-        self.w_lin = w_lin
-        self.w_ang = w_ang
+        # Per-axis weights. Equal by default: all three axes are commanded, so
+        # none is a second-class objective.
+        self.w_vx = w_vx
+        self.w_vy = w_vy
+        self.w_wz = w_wz
+        # Keeps the normalisation finite when the command is zero, where
+        # standing IS the goal and there is no improvement to normalise by.
+        self.rest_eps = rest_eps
         # Live command, replaced on every reset when ranges are configured.
         self.command = torch.tensor([float(vx), float(vy), float(wz)])
 
@@ -309,24 +327,45 @@ class TwistTrackingReward(RewardShapingBase):
 
     # -- reward -------------------------------------------------------------
 
+    def _axis(self, achieved, command, sigma):
+        """One axis, scored 0 at standstill and 1 on target.
+
+        ``rest`` is the raw kernel's value for a stationary robot under this
+        command; subtracting it and rescaling removes the credit that would
+        otherwise be earned by not moving. At ``command == 0`` the two collapse
+        and ``rest_eps`` leaves the raw kernel, which correctly rewards
+        holding still.
+        """
+        k = torch.exp(-((achieved - command) ** 2) / sigma)
+        rest = torch.exp(-(command**2) / sigma)
+        return ((k - rest + self.rest_eps) / (1 - rest + self.rest_eps)).clamp(0.0, 1.0)
+
     def terms(self, obs):
         vx, vy, wz = self.layout.body_twist(obs)
         cmd = self.command.to(obs.device, obs.dtype)
         cx, cy, cw = cmd[0], cmd[1], cmd[2]
-        lin_err2 = (vx - cx) ** 2 + (vy - cy) ** 2
-        ang_err2 = (wz - cw) ** 2
         return {
-            "lin": torch.exp(-lin_err2 / self.lin_sigma),
-            "ang": torch.exp(-ang_err2 / self.ang_sigma),
+            "vx_track": self._axis(vx, cx, self.lin_sigma),
+            "vy_track": self._axis(vy, cy, self.lin_sigma),
+            "wz_track": self._axis(wz, cw, self.ang_sigma),
             "upright": self.layout.upright(obs).clamp(0.0, 1.0),
             "vx": vx,
             "vy": vy,
             "wz": wz,
         }
 
+    @property
+    def track_max(self):
+        """Reward at perfect tracking, for callers that normalise by it."""
+        return self.w_vx + self.w_vy + self.w_wz
+
     def shaping(self, tensordict, next_tensordict):
         t = self.terms(next_tensordict["observation"])
-        return t["upright"] * (self.w_lin * t["lin"] + self.w_ang * t["ang"])
+        return t["upright"] * (
+            self.w_vx * t["vx_track"]
+            + self.w_vy * t["vy_track"]
+            + self.w_wz * t["wz_track"]
+        )
 
     def after_step(self, next_tensordict):
         # Reward first, from the raw observation, then widen it. Order is not
@@ -387,7 +426,7 @@ class TrackingGatedGait(RewardShapingBase):
         self.w_gait = w_gait
         # Normalises the gate to [0, 1] so w_gait keeps its meaning: the value
         # of a perfect gait relative to perfect tracking.
-        self.track_max = self.twist.w_lin + self.twist.w_ang
+        self.track_max = self.twist.track_max
 
     def shaping(self, tensordict, next_tensordict):
         track = self.twist.shaping(tensordict, next_tensordict)
