@@ -61,9 +61,26 @@ def parse_args():
         default="gait_twist",
     )
     p.add_argument("--gait-weight", type=float, default=0.5)
-    p.add_argument("--num-cells", type=int, default=256)
+    p.add_argument(
+        "--num-cells",
+        type=int,
+        default=64,
+        help="policy hidden width; must match the checkpoint",
+    )
+    p.add_argument(
+        "--actor-layers",
+        type=int,
+        default=2,
+        help="policy hidden layers; must match the checkpoint",
+    )
     p.add_argument(
         "--policy-std", choices=["dependent", "independent"], default="independent"
+    )
+    p.add_argument(
+        "--policy-std-parametrization",
+        choices=["softplus", "exp"],
+        default="softplus",
+        help="must match the checkpoint",
     )
     p.add_argument("--steps-per-command", type=int, default=200)
     p.add_argument("--out", default="./videos/twist_demo.mp4")
@@ -192,15 +209,20 @@ def main():
     # load.
     algorithm = PPO(
         args.env_name,
-        hidden_layers_size=args.num_cells,
+        actor_hidden_layers=args.actor_layers,
+        actor_hidden_layers_size=args.num_cells,
         custom_reward_functions=shaping,
         observations_warmup_steps=0,
         policy_std=args.policy_std,
+        policy_std_parametrization=args.policy_std_parametrization,
         device=args.device,
     )
-    algorithm.load_state_dict(
-        torch.load(args.checkpoint, map_location=algorithm.device, weights_only=False)
-    )
+    # Only the actor is needed to roll out, and it carries obs_norm as its
+    # first layer. Loading the full state would also pull in the optimiser,
+    # whose param groups differ whenever the checkpoint was trained with a
+    # cost critic that this viewer does not rebuild.
+    state = torch.load(args.checkpoint, map_location=algorithm.device, weights_only=False)
+    algorithm.actor_net.load_state_dict(state["actor"])
 
     env = make_single_env(
         args.env_name,

@@ -31,30 +31,75 @@ def _activation(spec):
     return spec() if isinstance(spec, type) else copy.deepcopy(spec)
 
 
+def _mlp_trunk(in_dim, width, num_layers, activation):
+    """``num_layers`` hidden layers of ``width``, each followed by activation."""
+    layers = []
+    for i in range(num_layers):
+        layers += [
+            nn.Linear(in_dim if i == 0 else width, width),
+            _activation(activation),
+        ]
+    return layers
+
+
+def _scale_layer(layer, scale):
+    """Shrink a layer's weights in place and zero its bias."""
+    with torch.no_grad():
+        layer.weight.mul_(scale)
+        if layer.bias is not None:
+            layer.bias.zero_()
+
+
 class PPO(Algorithm):
-    """Clipped-objective PPO with running observation and value normalisation."""
+    """Clipped-objective PPO with running observation and value normalisation.
+
+    Defaults follow the recommendations of Andrychowicz et al. (2021),
+    *What Matters In On-Policy Reinforcement Learning?*, measured over a large
+    sweep on MuJoCo continuous control. The choices they found to matter, and
+    where each lives:
+
+    * small init on the final policy layer (``policy_final_layer_scale``)
+    * state-independent std, softplus-parametrised, starting at 0.5
+      (``policy_std``, :class:`StateIndependentNormalParams`)
+    * separate policy and value networks, value net WIDER than the policy
+      (``actor_hidden_layers_size`` 64 vs ``critic_hidden_layers_size`` 256)
+    * tanh activations, observation normalisation clipped at 10, value-target
+      normalisation
+    * ``clip_epsilon`` 0.25, ``lmbda`` 0.9, ``max_grad_norm`` 0.5, 3 passes
+      over each batch, Adam 3e-4 decayed linearly to 0
+    * no entropy bonus -- they found it did not help on any task studied
+
+    Time-limit handling (bootstrap through truncation, cut at true termination)
+    is the other item on their list; TorchRL's GAE already does it via the
+    ``terminated`` key.
+    """
 
     def __init__(
         self,
         env_name,
         actor_hidden_layers=2,
         value_hidden_layers=2,
-        hidden_layers_size=256,
+        actor_hidden_layers_size=64,
+        critic_hidden_layers_size=256,
         activation_function=nn.Tanh,
         custom_reward_functions=None,
         normalized_observation_clip=10.0,
         observations_warmup_steps=2000,
         value_target_normalizer="running",
-        policy_std="dependent",
+        policy_std="independent",
+        policy_init_std=0.5,
+        policy_std_parametrization="softplus",
+        policy_final_layer_scale=0.01,
         lr=3e-4,
-        num_epochs=10,
+        lr_schedule="linear",
+        num_epochs=3,
         sub_batch_size=256,
-        clip_epsilon=0.2,
+        clip_epsilon=0.25,
         gamma=0.99,
-        lmbda=0.95,
-        entropy_eps=1e-4,
+        lmbda=0.9,
+        entropy_eps=0.0,
         critic_coeff=1.0,
-        max_grad_norm=1.0,
+        max_grad_norm=0.5,
         constraints=None,
         cost_limit=0.02,
         lagrange_lr=0.035,
@@ -78,6 +123,7 @@ class PPO(Algorithm):
         self.critic_coeff = critic_coeff
         self.max_grad_norm = max_grad_norm
         self.policy_std = policy_std
+        self.lr_schedule = lr_schedule
 
         # First layer common to actor and value nets
         self.obs_norm = RunningObsNorm(
@@ -91,33 +137,33 @@ class PPO(Algorithm):
                 custom_reward_functions=custom_reward_functions,
             )
 
-        # Actor net
-        actor_layers = [
-            self.obs_norm,
-            nn.Linear(self.obs_dim, hidden_layers_size),
-            _activation(activation_function),
-        ]
-        for _ in range(actor_hidden_layers):
-            actor_layers.extend(
-                [
-                    nn.Linear(hidden_layers_size, hidden_layers_size),
-                    _activation(activation_function),
-                ]
-            )
+        # Actor net. Two hidden layers of 64 by default: the paper found the
+        # policy needs far less capacity than the value function.
+        actor_layers = [self.obs_norm]
+        actor_layers += _mlp_trunk(
+            self.obs_dim,
+            actor_hidden_layers_size,
+            actor_hidden_layers,
+            activation_function,
+        )
         if policy_std == "independent":
-            actor_layers.extend(
-                [
-                    nn.Linear(hidden_layers_size, self.action_dim),
-                    StateIndependentNormalParams(self.action_dim),
-                ]
-            )
+            head = nn.Linear(actor_hidden_layers_size, self.action_dim)
+            actor_layers += [
+                head,
+                StateIndependentNormalParams(
+                    self.action_dim,
+                    init_std=policy_init_std,
+                    parametrization=policy_std_parametrization,
+                ),
+            ]
         else:
-            actor_layers.extend(
-                [
-                    nn.Linear(hidden_layers_size, 2 * self.action_dim),
-                    NormalParamExtractor(),
-                ]
-            )
+            head = nn.Linear(actor_hidden_layers_size, 2 * self.action_dim)
+            actor_layers += [head, NormalParamExtractor()]
+        # Shrinking the last policy layer starts the agent near zero mean
+        # action, so early exploration comes from the std rather than from
+        # whatever the random head happened to prefer. Highest-impact single
+        # initialisation choice in the study.
+        _scale_layer(head, policy_final_layer_scale)
         self.actor_net = nn.Sequential(*actor_layers).to(self.device)
         self.policy_module = ProbabilisticActor(
             module=TensorDictModule(self.actor_net, in_keys=in_keys, out_keys=out_keys),
@@ -140,19 +186,14 @@ class PPO(Algorithm):
         else:
             self.value_norm = None
 
-        value_layers = [
-            self.obs_norm,
-            nn.Linear(self.obs_dim, hidden_layers_size),
-            _activation(activation_function),
-        ]
-        for _ in range(value_hidden_layers):
-            value_layers.extend(
-                [
-                    nn.Linear(hidden_layers_size, hidden_layers_size),
-                    _activation(activation_function),
-                ]
-            )
-        value_layers.append(nn.Linear(hidden_layers_size, 1))
+        value_layers = [self.obs_norm]
+        value_layers += _mlp_trunk(
+            self.obs_dim,
+            critic_hidden_layers_size,
+            value_hidden_layers,
+            activation_function,
+        )
+        value_layers.append(nn.Linear(critic_hidden_layers_size, 1))
         value_trunk = nn.Sequential(*value_layers).to(self.device)
         self.value_net = (
             value_trunk
@@ -177,19 +218,16 @@ class PPO(Algorithm):
                     else None
                 )
             )
-            cost_layers = [
-                self.obs_norm,
-                nn.Linear(self.obs_dim, hidden_layers_size),
-                _activation(activation_function),
-            ]
-            for _ in range(value_hidden_layers):
-                cost_layers.extend(
-                    [
-                        nn.Linear(hidden_layers_size, hidden_layers_size),
-                        _activation(activation_function),
-                    ]
-                )
-            cost_layers.append(nn.Linear(hidden_layers_size, 1))
+            # Same shape as the reward critic: it is a value function over the
+            # same observations, differing only in what it regresses onto.
+            cost_layers = [self.obs_norm]
+            cost_layers += _mlp_trunk(
+                self.obs_dim,
+                critic_hidden_layers_size,
+                value_hidden_layers,
+                activation_function,
+            )
+            cost_layers.append(nn.Linear(critic_hidden_layers_size, 1))
             cost_trunk = nn.Sequential(*cost_layers).to(self.device)
             cost_net = (
                 cost_trunk
@@ -266,9 +304,16 @@ class PPO(Algorithm):
             storage=LazyTensorStorage(max_size=frames_per_batch, device=self.device),
             sampler=SamplerWithoutReplacement(),
         )
-        if num_iterations:
-            self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-                self.optim, max(1, num_iterations), 0.0
+        if num_iterations and self.lr_schedule != "constant":
+            steps = max(1, num_iterations)
+            self.scheduler = (
+                # Linear decay to zero: the schedule the study measured a
+                # (small) gain from.
+                torch.optim.lr_scheduler.LinearLR(
+                    self.optim, start_factor=1.0, end_factor=0.0, total_iters=steps
+                )
+                if self.lr_schedule == "linear"
+                else torch.optim.lr_scheduler.CosineAnnealingLR(self.optim, steps, 0.0)
             )
 
     def update(self, batch):
@@ -339,11 +384,12 @@ class PPO(Algorithm):
 
     def _optim_step(self, subdata):
         loss_vals = self.loss_module(subdata)
-        loss_value = loss_vals["loss_objective"] + loss_vals["loss_entropy"]
-        logs = {
-            "loss_objective": loss_vals["loss_objective"].item(),
-            "loss_entropy": loss_vals["loss_entropy"].item(),
-        }
+        loss_value = loss_vals["loss_objective"]
+        logs = {"loss_objective": loss_vals["loss_objective"].item()}
+        # Absent when the entropy bonus is off, which is the default.
+        if "loss_entropy" in loss_vals.keys():
+            loss_value = loss_value + loss_vals["loss_entropy"]
+            logs["loss_entropy"] = loss_vals["loss_entropy"].item()
 
         if self.value_norm is None:
             loss_value = loss_value + loss_vals["loss_critic"]
@@ -387,7 +433,7 @@ class PPO(Algorithm):
             self.scheduler.step()
 
     def summary(self):
-        fields = {"policy_std": self.policy_std}
+        fields = {"policy_std": self.policy_std, "lr_schedule": self.lr_schedule}
         if self.lagrange is not None:
             fields["constraints"] = self.constraints
             fields["cost_limit"] = self.lagrange.cost_limit

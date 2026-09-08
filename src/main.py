@@ -46,10 +46,76 @@ def parse_args():
     p.add_argument("--frames-per-batch", type=int, default=8192)
     p.add_argument("--total-frames", type=int, default=204_800)
     p.add_argument("--sub-batch-size", type=int, default=256)
-    p.add_argument("--num-epochs", type=int, default=10)
+    p.add_argument(
+        "--num-epochs", type=int, default=3, help="passes over each collected batch"
+    )
     p.add_argument("--lr", type=float, default=3e-4)
-    p.add_argument("--num-cells", type=int, default=256)
-    p.add_argument("--entropy-eps", type=float, default=1e-4)
+    p.add_argument(
+        "--lr-schedule",
+        choices=["linear", "cosine", "constant"],
+        default="linear",
+        help="decay of the Adam learning rate over the run",
+    )
+    p.add_argument(
+        "--actor-num-cells",
+        type=int,
+        default=64,
+        help=(
+            "policy hidden width. Deliberately narrower than the critic: the "
+            "policy needs much less capacity than the value function."
+        ),
+    )
+    p.add_argument(
+        "--critic-num-cells",
+        type=int,
+        default=256,
+        help="value (and cost) hidden width",
+    )
+    p.add_argument("--actor-layers", type=int, default=2, help="policy hidden layers")
+    p.add_argument(
+        "--critic-layers", type=int, default=2, help="value hidden layers"
+    )
+    p.add_argument(
+        "--clip-epsilon", type=float, default=0.25, help="PPO ratio clip range"
+    )
+    p.add_argument("--gamma", type=float, default=0.99, help="discount")
+    p.add_argument("--gae-lambda", type=float, default=0.9, help="GAE lambda")
+    p.add_argument(
+        "--max-grad-norm", type=float, default=0.5, help="gradient-norm clip"
+    )
+    p.add_argument(
+        "--entropy-eps",
+        type=float,
+        default=0.0,
+        help=(
+            "entropy bonus coefficient. Off by default: a large sweep found no "
+            "task where it helped. Exploration comes from the policy std."
+        ),
+    )
+    p.add_argument(
+        "--policy-init-std",
+        type=float,
+        default=0.5,
+        help="initial action standard deviation (--policy-std independent)",
+    )
+    p.add_argument(
+        "--policy-std-parametrization",
+        choices=["softplus", "exp"],
+        default="softplus",
+        help=(
+            "map from the learned parameter to the std. Softplus decays more "
+            "slowly than the classic log-std form, which keeps exploration alive."
+        ),
+    )
+    p.add_argument(
+        "--policy-final-layer-scale",
+        type=float,
+        default=0.01,
+        help=(
+            "multiplier on the final policy layer's weights at init. Starts the "
+            "agent near zero mean action so early exploration is set by the std."
+        ),
+    )
     p.add_argument(
         "--shaping",
         choices=sorted(REWARD_SHAPERS),
@@ -84,13 +150,22 @@ def parse_args():
         ),
     )
     p.add_argument(
+        "--twist-weights",
+        default="1.0,1.0,1.0",
+        help=(
+            "per-axis tracking weights as 'vx,vy,wz'. Each axis has its own "
+            "Gaussian kernel, so these set how much each is worth relative to "
+            "the others."
+        ),
+    )
+    p.add_argument(
         "--gait-weight",
         type=float,
         default=0.5,
         help=(
-            "weight of the gait-quality terms in --shaping gait_twist. The "
-            "twist tracking term is fixed at 1.0, so this sets how much clean "
-            "footfall is worth relative to following the command."
+            "weight of the gait-quality terms in --shaping gait_twist, "
+            "relative to perfect tracking. Gait credit is scaled by tracking "
+            "quality, so it cannot be earned by standing still."
         ),
     )
     p.add_argument(
@@ -122,9 +197,7 @@ def parse_args():
         "--eval-episodes",
         type=int,
         default=1,
-        help=(
-            "rollouts averaged per eval."
-        ),
+        help=("rollouts averaged per eval."),
     )
     p.add_argument(
         "--render-every",
@@ -145,7 +218,7 @@ def parse_args():
     p.add_argument(
         "--policy-std",
         choices=["dependent", "independent"],
-        default="dependent",
+        default="independent",
         help=(
             "how the policy standard deviation is produced. 'dependent' reads "
             "it off the network output (NormalParamExtractor); 'independent' "
@@ -225,7 +298,17 @@ def main():
                     "--twist-range needs three lo:hi pairs, e.g. "
                     "'-0.5:1.5,-0.5:0.5,-1:1'"
                 )
-        kw = dict(env_name=args.env_name, vx=vx, vy=vy, wz=wz, command_ranges=ranges)
+        w_vx, w_vy, w_wz = (float(v) for v in args.twist_weights.split(","))
+        kw = dict(
+            env_name=args.env_name,
+            vx=vx,
+            vy=vy,
+            wz=wz,
+            command_ranges=ranges,
+            w_vx=w_vx,
+            w_vy=w_vy,
+            w_wz=w_wz,
+        )
         if shaping == "gait_twist":
             shaping = partial(gait_twist, w_gait=args.gait_weight, **kw)
         elif shaping == "gait_twist_sum":
@@ -235,16 +318,27 @@ def main():
 
     algorithm = PPO(
         args.env_name,
-        hidden_layers_size=args.num_cells,
+        actor_hidden_layers=args.actor_layers,
+        value_hidden_layers=args.critic_layers,
+        actor_hidden_layers_size=args.actor_num_cells,
+        critic_hidden_layers_size=args.critic_num_cells,
         custom_reward_functions=shaping,
         normalized_observation_clip=args.obs_clip,
         observations_warmup_steps=args.obs_warmup,
         value_target_normalizer=args.value_norm,
         policy_std=args.policy_std,
+        policy_init_std=args.policy_init_std,
+        policy_std_parametrization=args.policy_std_parametrization,
+        policy_final_layer_scale=args.policy_final_layer_scale,
         lr=args.lr,
+        lr_schedule=args.lr_schedule,
         num_epochs=args.num_epochs,
         sub_batch_size=args.sub_batch_size,
+        clip_epsilon=args.clip_epsilon,
+        gamma=args.gamma,
+        lmbda=args.gae_lambda,
         entropy_eps=args.entropy_eps,
+        max_grad_norm=args.max_grad_norm,
         constraints=args.constraints,
         cost_limit=args.cost_limit,
         lagrange_lr=args.lagrange_lr,
