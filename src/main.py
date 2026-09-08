@@ -23,6 +23,16 @@ from src.ppo import PPO  # noqa: E402
 from src.trainer import Trainer  # noqa: E402
 
 
+def _axis_values(spec):
+    """``'0.5'`` -> 0.5; ``'0.2,0.5,0.5'`` -> a per-axis triple."""
+    parts = [float(v) for v in str(spec).split(",")]
+    if len(parts) == 1:
+        return parts[0]
+    if len(parts) != 3:
+        raise SystemExit("expected one value or three, as 'vx,vy,wz'")
+    return tuple(parts)
+
+
 def parse_args():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--env-name", default="InvertedDoublePendulum-v5")
@@ -147,6 +157,25 @@ def parse_args():
             "observation, so the policy can learn to follow ANY twist in the "
             "range rather than the single one it was trained on. Without this "
             "the command is fixed at --twist."
+        ),
+    )
+    p.add_argument(
+        "--twist-deadzone",
+        default="0.5",
+        help=(
+            "fraction of each axis's range kept clear of zero when sampling "
+            "commands. A command just above zero is nearly satisfied by "
+            "standing still, so a range full of them makes standing optimal. "
+            "One value for all axes, or 'vx,vy,wz' to set them separately."
+        ),
+    )
+    p.add_argument(
+        "--twist-zero-prob",
+        type=float,
+        default=0.1,
+        help=(
+            "probability that a sampled axis is exactly zero. Standing is a "
+            "real command and is scored correctly, so it is kept in the mix."
         ),
     )
     p.add_argument(
@@ -305,6 +334,8 @@ def main():
             vy=vy,
             wz=wz,
             command_ranges=ranges,
+            command_deadzone=_axis_values(args.twist_deadzone),
+            command_zero_prob=args.twist_zero_prob,
             w_vx=w_vx,
             w_vy=w_vy,
             w_wz=w_wz,

@@ -267,6 +267,8 @@ class TwistTrackingReward(RewardShapingBase):
         vy=0.0,
         wz=0.0,
         command_ranges=None,
+        command_deadzone=0.5,
+        command_zero_prob=0.1,
         lin_sigma=0.25,
         ang_sigma=0.4,
         w_vx=1.0,
@@ -278,6 +280,14 @@ class TwistTrackingReward(RewardShapingBase):
         self.layout = get_layout(env_name)
         self.base_obs_dim = self.layout.obs_dim
         self.command_ranges = command_ranges
+        # Fraction of each axis's extent kept clear of zero when sampling.
+        # A scalar applies to all three; a triple sets them per axis.
+        self.command_deadzone = (
+            (float(command_deadzone),) * self.COMMAND_DIM
+            if isinstance(command_deadzone, (int, float))
+            else tuple(float(d) for d in command_deadzone)
+        )
+        self.command_zero_prob = command_zero_prob
         self.lin_sigma = lin_sigma
         self.ang_sigma = ang_sigma
         # Per-axis weights. Equal by default: all three axes are commanded, so
@@ -290,16 +300,81 @@ class TwistTrackingReward(RewardShapingBase):
         self.rest_eps = rest_eps
         # Live command, replaced on every reset when ranges are configured.
         self.command = torch.tensor([float(vx), float(vy), float(wz)])
+        # Set by use_fixed_commands(); overrides the random draw when present.
+        self._fixed_commands = None
+        self._fixed_index = 0
 
     # -- command plumbing ---------------------------------------------------
 
+    def _sample_axis(self, lo, hi, deadzone, generator=None):
+        """One axis: exactly zero, or outside the dead zone around zero.
+
+        A command drawn just above zero is nearly satisfied by standing still,
+        so a range full of them makes standing a strong optimum however the
+        kernel is normalised. Excluding the band leaves commands the robot has
+        to move to earn. Exact zero is kept at ``command_zero_prob`` because it
+        is a real command, and one standing already scores correctly.
+        """
+
+        def _u(a, b):
+            return a + (b - a) * float(torch.rand(1, generator=generator))
+
+        if lo <= 0.0 <= hi and float(torch.rand(1, generator=generator)) < (
+            self.command_zero_prob
+        ):
+            return 0.0
+        dead = deadzone * max(abs(lo), abs(hi))
+        # The parts of [lo, hi] left once the dead zone is removed.
+        bands = [(a, b) for a, b in ((lo, min(hi, -dead)), (max(lo, dead), hi)) if b > a]
+        if not bands:
+            return _u(lo, hi)
+        widths = [b - a for a, b in bands]
+        pick = float(torch.rand(1, generator=generator)) * sum(widths)
+        for (a, b), w in zip(bands, widths):
+            if pick <= w:
+                return _u(a, b)
+            pick -= w
+        return _u(*bands[-1])
+
+    def sample_command(self, generator=None):
+        """Draw one command from the configured ranges."""
+        return torch.tensor(
+            [
+                self._sample_axis(lo, hi, dead, generator)
+                for (lo, hi), dead in zip(self.command_ranges, self.command_deadzone)
+            ]
+        )
+
+    def command_set(self, n, seed=0):
+        """``n`` commands drawn reproducibly, for evaluation."""
+        g = torch.Generator().manual_seed(seed)
+        return torch.stack([self.sample_command(g) for _ in range(n)])
+
+    def use_fixed_commands(self, commands):
+        """Cycle a fixed list of commands instead of drawing at random.
+
+        Evaluation redrew its commands every time, so the eval number moved
+        with the draw as much as with the policy -- a single episode of a
+        motionless policy spans 749-4242 on this reward. A fixed set makes
+        successive evals comparable, which is what checkpoint selection needs.
+        """
+        self._fixed_commands = commands
+        self._fixed_index = 0
+
+    def rewind_commands(self):
+        """Restart the fixed set, so every eval sees the same commands."""
+        self._fixed_index = 0
+
     def _resample(self, reference):
         """Draw a new command for the episode, if randomisation is enabled."""
+        if self._fixed_commands is not None:
+            n = len(self._fixed_commands)
+            self.command = self._fixed_commands[self._fixed_index % n].clone()
+            self._fixed_index += 1
+            return
         if self.command_ranges is None:
             return
-        lo = torch.tensor([r[0] for r in self.command_ranges])
-        hi = torch.tensor([r[1] for r in self.command_ranges])
-        self.command = lo + (hi - lo) * torch.rand(self.COMMAND_DIM)
+        self.command = self.sample_command()
 
     def _append_command(self, tensordict):
         """Concatenate the command onto the observation."""
@@ -472,3 +547,21 @@ REWARD_SHAPERS = {
     "gait_twist": gait_twist,
     "gait_twist_sum": gait_twist_sum,
 }
+
+
+def find_twist_shaper(transform):
+    """The :class:`TwistTrackingReward` inside an env's transform, or ``None``."""
+    if isinstance(transform, TwistTrackingReward):
+        return transform
+    if isinstance(transform, TrackingGatedGait):
+        return transform.twist
+    if isinstance(transform, CompositeReward):
+        for _, member in transform.members:
+            found = find_twist_shaper(member)
+            if found is not None:
+                return found
+    for child in getattr(transform, "transforms", []):
+        found = find_twist_shaper(child)
+        if found is not None:
+            return found
+    return None

@@ -33,6 +33,7 @@ from src.env.rewards import (  # noqa: E402
     GaitReward,
     TrackingGatedGait,
     TwistTrackingReward,
+    find_twist_shaper,
     gait_twist,
     gait_twist_sum,
 )
@@ -83,6 +84,15 @@ def parse_args():
         help="must match the checkpoint",
     )
     p.add_argument("--steps-per-command", type=int, default=200)
+    p.add_argument(
+        "--script",
+        default=None,
+        help=(
+            "override the command sequence, as 'label:vx:vy:wz,...'. Use an "
+            "EQUALS sign when any value is negative. Commands outside the "
+            "range the policy was trained on test extrapolation, not tracking."
+        ),
+    )
     p.add_argument("--out", default="./videos/twist_demo.mp4")
     p.add_argument("--trace-out", default=None, help="per-step trace, as JSON")
     p.add_argument("--fps", type=int, default=50)
@@ -93,22 +103,13 @@ def parse_args():
     return p.parse_args()
 
 
-def find_twist_shaper(transform):
-    """Dig the twist shaper out of whatever the env was built with."""
-    if isinstance(transform, TwistTrackingReward):
-        return transform
-    if isinstance(transform, TrackingGatedGait):
-        return transform.twist
-    if isinstance(transform, CompositeReward):
-        for _, member in transform.members:
-            found = find_twist_shaper(member)
-            if found is not None:
-                return found
-    for child in getattr(transform, "transforms", []):
-        found = find_twist_shaper(child)
-        if found is not None:
-            return found
-    return None
+def parse_script(spec):
+    """``'label:vx:vy:wz,...'`` -> the same tuples as :data:`DEFAULT_SCRIPT`."""
+    script = []
+    for part in spec.split(","):
+        label, vx, vy, wz = part.rsplit(":", 3)
+        script.append((label.strip(), float(vx), float(vy), float(wz)))
+    return script
 
 
 def find_gait_shaper(transform):
@@ -196,6 +197,7 @@ def annotate(frame, label, command, achieved, contacts, font, small):
 def main():
     args = parse_args()
     torch.manual_seed(args.seed)
+    script = DEFAULT_SCRIPT if args.script is None else parse_script(args.script)
 
     builder = {
         "gait_twist": partial(gait_twist, w_gait=args.gait_weight),
@@ -255,7 +257,7 @@ def main():
 
     td = env.reset()
     with set_exploration_type(ExplorationType.DETERMINISTIC), torch.no_grad():
-        for label, vx, vy, wz in DEFAULT_SCRIPT:
+        for label, vx, vy, wz in script:
             command = (vx, vy, wz)
             shaper.command = torch.tensor([vx, vy, wz], dtype=torch.float32)
             for _ in range(args.steps_per_command):
@@ -303,7 +305,7 @@ def main():
         Path(args.trace_out).write_text(json.dumps({"resets": resets, "trace": trace}))
 
     print(f"wrote {args.out} ({len(trace)} frames, {resets} resets)")
-    for label, vx, vy, wz in DEFAULT_SCRIPT:
+    for label, vx, vy, wz in script:
         rows = [t for t in trace if t["label"] == label]
         if not rows:
             continue

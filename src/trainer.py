@@ -11,6 +11,7 @@ from torchrl.collectors import MultiSyncCollector
 from torchrl.envs.utils import ExplorationType, set_exploration_type
 from tqdm import tqdm
 
+from src.env.rewards import TwistTrackingReward, find_twist_shaper
 from src.env.utils import make_batched_env, make_single_env
 
 
@@ -98,6 +99,7 @@ class Trainer:
         self.logs = defaultdict(list)
         self.collector = None
         self.eval_env = None
+        self.eval_shaper = None
         self.render_env = None
         self.video_writer = None
 
@@ -142,6 +144,13 @@ class Trainer:
             custom_reward_functions=self.custom_reward_functions,
             constraints=self.constraints,
         )
+        # Pin the eval commands. Redrawing them every eval put the draw's
+        # spread straight into the curve and into checkpoint selection.
+        self.eval_shaper = find_twist_shaper(self.eval_env.transform)
+        if self.eval_shaper is not None and self.eval_shaper.command_ranges:
+            self.eval_shaper.use_fixed_commands(
+                self.eval_shaper.command_set(self.eval_episodes, seed=self.seed or 0)
+            )
 
         if self.render_every:
             # Imported lazily
@@ -221,9 +230,15 @@ class Trainer:
     def evaluate(self):
         """Roll the policy out without exploration and log"""
         returns, shaped, per_step, steps, costs = [], [], [], [], []
+        mae = []
+        if self.eval_shaper is not None:
+            # Same commands, same order, every eval.
+            self.eval_shaper.rewind_commands()
         with set_exploration_type(ExplorationType.DETERMINISTIC), torch.no_grad():
             for _ in range(self.eval_episodes):
                 rollout = self.eval_env.rollout(self.eval_steps, self.algorithm.policy)
+                if self.eval_shaper is not None:
+                    mae.append(self._tracking_error(rollout))
                 returns.append(rollout["next", self.reward_key].sum().item())
                 per_step.append(rollout["next", self.reward_key].mean().item())
                 if self.shaped_key is not None:
@@ -245,8 +260,22 @@ class Trainer:
         self.logs["eval step_count (mean)"].append(statistics.fmean(steps))
         if costs:
             self.logs["eval cost"].append(statistics.fmean(costs))
+        if mae:
+            # The number the scalar cannot give: how far off each axis is.
+            # A policy that stands still reads its own command back here.
+            for i, axis in enumerate(("vx", "vy", "wz")):
+                self.logs[f"eval mae {axis}"].append(
+                    statistics.fmean(m[i] for m in mae)
+                )
 
         self._maybe_checkpoint()
+
+    def _tracking_error(self, rollout):
+        """Mean |achieved - commanded| per axis over one eval episode."""
+        obs = rollout["next", "observation"]
+        command = obs[..., -TwistTrackingReward.COMMAND_DIM :]
+        achieved = torch.stack(self.eval_shaper.layout.body_twist(obs), dim=-1)
+        return (achieved - command).abs().mean(dim=0).tolist()
 
     def _maybe_checkpoint(self):
         """Save the latest policy, and separately the best one seen so far"""
@@ -303,6 +332,15 @@ class Trainer:
                 f"shaped={self.logs['shaped_reward'][-1]: 4.4f} "
                 f"(init={self.logs['shaped_reward'][0]: 4.4f})"
             )
+        if self.logs["eval mae vx"]:
+            # Watchable live: the scalar above cannot tell walking from standing.
+            parts.append(
+                "mae=("
+                + ",".join(
+                    f"{self.logs[f'eval mae {a}'][-1]:.2f}" for a in ("vx", "vy", "wz")
+                )
+                + ")"
+            )
         if self.logs["cost"]:
             cost = f"cost={self.logs['cost'][-1]:.4f}"
             if self.logs["eval cost"]:
@@ -348,6 +386,11 @@ class Trainer:
             "eval_shaped_best": (
                 f"{max(shaped_evals):.4f}" if shaped_evals else float("nan")
             ),
+            **{
+                f"eval_mae_{axis}": f"{self.logs[f'eval mae {axis}'][-1]:.4f}"
+                for axis in ("vx", "vy", "wz")
+                if self.logs[f"eval mae {axis}"]
+            },
             "eval_steps_final": (
                 self.logs["eval step_count"][-1] if self.logs["eval step_count"] else -1
             ),
