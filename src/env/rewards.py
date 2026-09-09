@@ -269,6 +269,7 @@ class TwistTrackingReward(RewardShapingBase):
         command_ranges=None,
         command_deadzone=0.5,
         command_zero_prob=0.1,
+        command_stop_prob=0.15,
         lin_sigma=0.25,
         ang_sigma=0.4,
         w_vx=1.0,
@@ -288,6 +289,7 @@ class TwistTrackingReward(RewardShapingBase):
             else tuple(float(d) for d in command_deadzone)
         )
         self.command_zero_prob = command_zero_prob
+        self.command_stop_prob = command_stop_prob
         self.lin_sigma = lin_sigma
         self.ang_sigma = ang_sigma
         # Per-axis weights. Equal by default: all three axes are commanded, so
@@ -337,7 +339,18 @@ class TwistTrackingReward(RewardShapingBase):
         return _u(*bands[-1])
 
     def sample_command(self, generator=None):
-        """Draw one command from the configured ranges."""
+        """Draw one command from the configured ranges.
+
+        Stops are drawn jointly. Zeroing axes independently makes a full stop
+        vanishingly rare -- at a 0.3 per-axis rate only 2.8% of episodes are
+        one -- while every single-axis zero still pays a stationary robot, so
+        the cost of teaching the robot to stop lands almost entirely on the
+        reward floor rather than on the behaviour.
+        """
+        if self.command_stop_prob and float(torch.rand(1, generator=generator)) < (
+            self.command_stop_prob
+        ):
+            return torch.zeros(self.COMMAND_DIM)
         return torch.tensor(
             [
                 self._sample_axis(lo, hi, dead, generator)
@@ -346,9 +359,28 @@ class TwistTrackingReward(RewardShapingBase):
         )
 
     def command_set(self, n, seed=0):
-        """``n`` commands drawn reproducibly, for evaluation."""
+        """``n`` evaluation commands: axis coverage first, random fill after.
+
+        Independent draws leave axes untested -- one 8-episode set came out
+        with five zero-vx commands, so forward error had almost no room to
+        move and the run read as flat on the axis it had actually lost. The
+        fixed head exercises every axis and sign, largest magnitudes first so
+        a short set still covers them.
+        """
+        probes = [[0.0] * self.COMMAND_DIM]
+        for frac in (0.9, 0.4):
+            for i, (lo, hi) in enumerate(self.command_ranges):
+                for bound in (hi, lo):
+                    if bound == 0.0:
+                        continue
+                    command = [0.0] * self.COMMAND_DIM
+                    command[i] = frac * bound
+                    probes.append(command)
         g = torch.Generator().manual_seed(seed)
-        return torch.stack([self.sample_command(g) for _ in range(n)])
+        # Anything past the probes is a plain draw, so the set stays
+        # representative of what the policy is actually trained on.
+        fill = [self.sample_command(g) for _ in range(max(0, n - len(probes)))]
+        return torch.stack([torch.tensor(c) for c in probes[:n]] + fill)
 
     def use_fixed_commands(self, commands):
         """Cycle a fixed list of commands instead of drawing at random.

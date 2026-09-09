@@ -100,6 +100,7 @@ class Trainer:
         self.collector = None
         self.eval_env = None
         self.eval_shaper = None
+        self.eval_span = None
         self.render_env = None
         self.video_writer = None
 
@@ -151,6 +152,16 @@ class Trainer:
             self.eval_shaper.use_fixed_commands(
                 self.eval_shaper.command_set(self.eval_episodes, seed=self.seed or 0)
             )
+            # Per-axis extents, to put the tracking errors in comparable units
+            # before they are averaged into one score. An axis with a zero
+            # range is never commanded to move -- it is a regulator, not a
+            # tracked axis -- so it has no scale to normalise by and is left
+            # out of the score. Its error is still logged.
+            self.eval_span = [
+                max(abs(lo), abs(hi)) for lo, hi in self.eval_shaper.command_ranges
+            ]
+            if not any(self.eval_span):
+                self.eval_span = None
 
         if self.render_every:
             # Imported lazily
@@ -267,6 +278,18 @@ class Trainer:
                 self.logs[f"eval mae {axis}"].append(
                     statistics.fmean(m[i] for m in mae)
                 )
+            if self.eval_span is not None:
+                # One number for how well the commands were followed, with the
+                # axes in comparable units. 1.0 is exact tracking.
+                self.logs["eval track score"].append(
+                    statistics.fmean(
+                        1.0
+                        - statistics.fmean(
+                            e / s for e, s in zip(m, self.eval_span) if s
+                        )
+                        for m in mae
+                    )
+                )
 
         self._maybe_checkpoint()
 
@@ -286,10 +309,16 @@ class Trainer:
         state = self.algorithm.state_dict()
         _torch.save(state, self.checkpoint_dir / "final.pt")
 
-        # Score on the objective the policy is actually maximising
-        current = self.logs[
-            "eval shaped (sum)" if self.shaped_key else "eval reward (sum)"
-        ][-1]
+        # Score on how well the commands were actually followed. The shaped
+        # return is the wrong yardstick for a command-conditioned policy: it
+        # mixes tracking with whatever the eval command set happens to weight,
+        # and a set carrying many zero commands ranks a motionless policy top.
+        if self.logs["eval track score"]:
+            current = self.logs["eval track score"][-1]
+        else:
+            current = self.logs[
+                "eval shaped (sum)" if self.shaped_key else "eval reward (sum)"
+            ][-1]
         if self._best_eval is None or current > self._best_eval:
             self._best_eval = current
             _torch.save(state, self.checkpoint_dir / "best.pt")
@@ -332,6 +361,8 @@ class Trainer:
                 f"shaped={self.logs['shaped_reward'][-1]: 4.4f} "
                 f"(init={self.logs['shaped_reward'][0]: 4.4f})"
             )
+        if self.logs["eval track score"]:
+            parts.append(f"track={self.logs['eval track score'][-1]:.3f}")
         if self.logs["eval mae vx"]:
             # Watchable live: the scalar above cannot tell walking from standing.
             parts.append(
@@ -391,6 +422,16 @@ class Trainer:
                 for axis in ("vx", "vy", "wz")
                 if self.logs[f"eval mae {axis}"]
             },
+            "eval_track_score": (
+                f"{self.logs['eval track score'][-1]:.4f}"
+                if self.logs["eval track score"]
+                else float("nan")
+            ),
+            "eval_track_score_best": (
+                f"{max(self.logs['eval track score']):.4f}"
+                if self.logs["eval track score"]
+                else float("nan")
+            ),
             "eval_steps_final": (
                 self.logs["eval step_count"][-1] if self.logs["eval step_count"] else -1
             ),

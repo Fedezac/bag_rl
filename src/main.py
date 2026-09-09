@@ -170,6 +170,16 @@ def parse_args():
         ),
     )
     p.add_argument(
+        "--twist-stop-prob",
+        type=float,
+        default=0.15,
+        help=(
+            "probability that a command is a full stop, all three axes zero "
+            "at once. Zeroing axes independently almost never produces one, "
+            "so stopping goes untrained while the reward floor still rises."
+        ),
+    )
+    p.add_argument(
         "--twist-zero-prob",
         type=float,
         default=0.1,
@@ -357,6 +367,7 @@ def main():
             command_ranges=ranges,
             command_deadzone=_axis_values(args.twist_deadzone),
             command_zero_prob=args.twist_zero_prob,
+            command_stop_prob=args.twist_stop_prob,
             w_vx=w_vx,
             w_vy=w_vy,
             w_wz=w_wz,
