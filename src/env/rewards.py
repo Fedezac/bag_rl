@@ -270,11 +270,13 @@ class TwistTrackingReward(RewardShapingBase):
         command_deadzone=0.5,
         command_zero_prob=0.1,
         command_stop_prob=0.15,
+        command_straight_prob=0.15,
         lin_sigma=0.25,
         ang_sigma=0.4,
         w_vx=1.0,
         w_vy=1.0,
         w_wz=1.0,
+        idle_weight=1.0,
         rest_eps=0.05,
     ):
         super().__init__()
@@ -290,6 +292,7 @@ class TwistTrackingReward(RewardShapingBase):
         )
         self.command_zero_prob = command_zero_prob
         self.command_stop_prob = command_stop_prob
+        self.command_straight_prob = command_straight_prob
         self.lin_sigma = lin_sigma
         self.ang_sigma = ang_sigma
         # Per-axis weights. Equal by default: all three axes are commanded, so
@@ -297,6 +300,18 @@ class TwistTrackingReward(RewardShapingBase):
         self.w_vx = w_vx
         self.w_vy = w_vy
         self.w_wz = w_wz
+        # Weight an axis keeps when commanded to zero, as a fraction of its
+        # full weight. At 1.0 every axis counts the same whatever it was asked
+        # for, which pays a motionless robot for the axes that happen to be
+        # zero -- 71% of maximum on a straight-line command, where two of the
+        # three are.
+        self.idle_weight = idle_weight
+        spans = (
+            [max(abs(lo), abs(hi)) for lo, hi in command_ranges]
+            if command_ranges is not None
+            else [1.0] * self.COMMAND_DIM
+        )
+        self.command_span = torch.tensor(spans).clamp_min(1e-6)
         # Keeps the normalisation finite when the command is zero, where
         # standing IS the goal and there is no improvement to normalise by.
         self.rest_eps = rest_eps
@@ -308,7 +323,7 @@ class TwistTrackingReward(RewardShapingBase):
 
     # -- command plumbing ---------------------------------------------------
 
-    def _sample_axis(self, lo, hi, deadzone, generator=None):
+    def _sample_axis(self, lo, hi, deadzone, generator=None, allow_zero=True):
         """One axis: exactly zero, or outside the dead zone around zero.
 
         A command drawn just above zero is nearly satisfied by standing still,
@@ -321,8 +336,10 @@ class TwistTrackingReward(RewardShapingBase):
         def _u(a, b):
             return a + (b - a) * float(torch.rand(1, generator=generator))
 
-        if lo <= 0.0 <= hi and float(torch.rand(1, generator=generator)) < (
-            self.command_zero_prob
+        if (
+            allow_zero
+            and lo <= 0.0 <= hi
+            and float(torch.rand(1, generator=generator)) < self.command_zero_prob
         ):
             return 0.0
         dead = deadzone * max(abs(lo), abs(hi))
@@ -347,10 +364,20 @@ class TwistTrackingReward(RewardShapingBase):
         the cost of teaching the robot to stop lands almost entirely on the
         reward floor rather than on the behaviour.
         """
-        if self.command_stop_prob and float(torch.rand(1, generator=generator)) < (
-            self.command_stop_prob
-        ):
+        draw = float(torch.rand(1, generator=generator))
+        if draw < self.command_stop_prob:
             return torch.zeros(self.COMMAND_DIM)
+        if draw < self.command_stop_prob + self.command_straight_prob:
+            # Walking straight needs vx non-zero AND both other axes zero, which
+            # independent sampling almost never produces -- v10 saw it on ~8% of
+            # episodes and unlearned it, keeping forward motion only as part of
+            # a turn. Reserved the same way stops are.
+            command = torch.zeros(self.COMMAND_DIM)
+            lo, hi = self.command_ranges[0]
+            command[0] = self._sample_axis(
+                lo, hi, self.command_deadzone[0], generator, allow_zero=False
+            )
+            return command
         return torch.tensor(
             [
                 self._sample_axis(lo, hi, dead, generator)
@@ -467,12 +494,25 @@ class TwistTrackingReward(RewardShapingBase):
         return self.w_vx + self.w_vy + self.w_wz
 
     def shaping(self, tensordict, next_tensordict):
-        t = self.terms(next_tensordict["observation"])
-        return t["upright"] * (
-            self.w_vx * t["vx_track"]
-            + self.w_vy * t["vy_track"]
-            + self.w_wz * t["wz_track"]
-        )
+        obs = next_tensordict["observation"]
+        t = self.terms(obs)
+        weights = self._axis_weights(obs)
+        tracks = torch.stack([t["vx_track"], t["vy_track"], t["wz_track"]], dim=-1)
+        base = obs.new_tensor([self.w_vx, self.w_vy, self.w_wz])
+        # Renormalised, so perfect tracking is still worth track_max whatever
+        # the command asked for.
+        scaled = (weights * tracks).sum(-1) / weights.sum(-1) * base.sum()
+        return t["upright"] * scaled
+
+    def _axis_weights(self, obs):
+        """Per-axis weight, scaled by how much motion the command demands."""
+        base = obs.new_tensor([self.w_vx, self.w_vy, self.w_wz])
+        if self.idle_weight >= 1.0:
+            return base
+        command = self.command.to(obs.device, obs.dtype)
+        span = self.command_span.to(obs.device, obs.dtype)
+        demand = (command.abs() / span).clamp(0.0, 1.0)
+        return (base * (self.idle_weight + demand)).clamp_min(1e-6)
 
     def after_step(self, next_tensordict):
         # Reward first, from the raw observation, then widen it. Order is not

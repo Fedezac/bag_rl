@@ -180,6 +180,27 @@ def parse_args():
         ),
     )
     p.add_argument(
+        "--twist-idle-weight",
+        type=float,
+        default=1.0,
+        help=(
+            "weight an axis keeps when commanded to zero, as a fraction of its "
+            "full weight. 1.0 counts every axis equally regardless of the "
+            "command, which pays a motionless robot for whichever axes are "
+            "zero. Lower values make the commanded axes carry the score."
+        ),
+    )
+    p.add_argument(
+        "--twist-straight-prob",
+        type=float,
+        default=0.15,
+        help=(
+            "probability that a command is straight-line travel: vx non-zero, "
+            "every other axis exactly zero. Independent sampling produces this "
+            "rarely, so forward motion survives only as part of a turn."
+        ),
+    )
+    p.add_argument(
         "--twist-zero-prob",
         type=float,
         default=0.1,
@@ -368,6 +389,8 @@ def main():
             command_deadzone=_axis_values(args.twist_deadzone),
             command_zero_prob=args.twist_zero_prob,
             command_stop_prob=args.twist_stop_prob,
+            command_straight_prob=args.twist_straight_prob,
+            idle_weight=args.twist_idle_weight,
             w_vx=w_vx,
             w_vy=w_vy,
             w_wz=w_wz,
