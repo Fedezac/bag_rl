@@ -107,7 +107,7 @@ class Trainer:
     # -- setup / teardown ----------------------------------------------------
 
     def setup(self):
-        # Each worker process gets one torch thread
+        # Main-process pool only; workers get one thread via num_sub_threads.
         torch.set_num_threads(
             max(1, torch.get_num_threads() // max(1, self.num_workers))
         )
