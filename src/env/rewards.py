@@ -351,9 +351,17 @@ class TwistTrackingReward(RewardShapingBase):
             and float(torch.rand(1, generator=generator)) < self.command_zero_prob
         ):
             return 0.0
-        dead = deadzone * max(abs(lo), abs(hi))
+        # A fraction of each side's own extent, so an asymmetric range keeps
+        # both signs: at 0.5 on -0.2:0.4 the bands are [-0.2,-0.1], [0.2,0.4].
+        # Taken off the span instead, the shorter side vanishes entirely.
+        dead_lo = deadzone * abs(min(lo, 0.0))
+        dead_hi = deadzone * max(hi, 0.0)
         # The parts of [lo, hi] left once the dead zone is removed.
-        bands = [(a, b) for a, b in ((lo, min(hi, -dead)), (max(lo, dead), hi)) if b > a]
+        bands = [
+            (a, b)
+            for a, b in ((lo, min(hi, -dead_lo)), (max(lo, dead_hi), hi))
+            if b > a
+        ]
         if not bands:
             return _u(lo, hi)
         widths = [b - a for a, b in bands]
