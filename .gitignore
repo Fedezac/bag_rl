@@ -7,3 +7,5 @@ __pycache__
 ckpt/
 TODO.*
 todo.*
+# wandb run data (streamed to the server; nothing to version here)
+wandb/

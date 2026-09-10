@@ -368,6 +368,27 @@ def parse_args():
             "with. Recommended whenever the objective has changed."
         ),
     )
+    p.add_argument(
+        "--wandb",
+        action="store_true",
+        help=(
+            "mirror the training metrics to Weights & Biases. Needs "
+            "credentials: 'wandb login', or WANDB_API_KEY in the environment."
+        ),
+    )
+    p.add_argument("--wandb-project", default="crawler-rl")
+    p.add_argument(
+        "--wandb-name", default=None, help="run name; defaults to wandb's own"
+    )
+    p.add_argument("--wandb-entity", default=None, help="team or user to log under")
+    p.add_argument(
+        "--wandb-host",
+        default=None,
+        help=(
+            "base URL of a self-hosted W&B server, e.g. http://localhost:8080. "
+            "Log in against it once with 'wandb login --host <url>'."
+        ),
+    )
     p.add_argument("--seed", type=int, default=None)
     p.add_argument("--device", default=None, help="e.g. cuda:0 or cpu")
     p.add_argument("--no-plot", action="store_true")
@@ -470,6 +491,25 @@ def main():
             )
         print(note)
 
+    run = None
+    if args.wandb:
+        import os
+
+        import wandb
+
+        if args.wandb_host:
+            # Read by the client at init; the same variable 'wandb login
+            # --host' writes into the local settings.
+            os.environ["WANDB_BASE_URL"] = args.wandb_host
+        run = wandb.init(
+            project=args.wandb_project,
+            entity=args.wandb_entity,
+            name=args.wandb_name,
+            config=vars(args),
+        )
+        if run.url:
+            print(f"wandb: {run.url}")
+
     trainer = Trainer(
         algorithm,
         num_workers=args.num_workers,
@@ -483,13 +523,26 @@ def main():
         video_folder=args.video_folder,
         checkpoint_dir=args.checkpoint_dir,
         seed=args.seed,
+        wandb_run=run,
     )
 
     try:
         trainer.train()
-        print(trainer.result_line())
+        line = trainer.result_line()
+        print(line)
+        if run is not None:
+            # The RESULT line as summary fields, so runs can be sorted on them.
+            run.summary.update(
+                dict(
+                    part.split("=", 1)
+                    for part in line.split()
+                    if "=" in part and part != "RESULT"
+                )
+            )
     finally:
         trainer.close()
+        if run is not None:
+            run.finish()
 
     if not args.no_plot:
         trainer.plot()

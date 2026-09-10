@@ -51,6 +51,7 @@ class Trainer:
         checkpoint_dir=None,
         seed=None,
         progress=True,
+        wandb_run=None,
     ):
         total_envs = num_workers * envs_per_worker
         if frames_per_batch % total_envs:
@@ -78,6 +79,9 @@ class Trainer:
 
         self.eval_every = eval_every
         self.eval_steps = eval_steps
+        # Optional wandb run. Metrics are mirrored from self.logs, so
+        # anything the trainer already records is followed online for free.
+        self.wandb_run = wandb_run
         self.eval_episodes = eval_episodes
         self.render_every = render_every
         self.render_steps = render_steps
@@ -211,6 +215,7 @@ class Trainer:
         pbar = tqdm(total=self.total_frames, disable=not self.progress)
         try:
             for i, batch in enumerate(self.collector):
+                seen = {k: len(v) for k, v in self.logs.items()}
                 for key, value in self.algorithm.update(batch).items():
                     self.logs[key].append(value)
 
@@ -231,12 +236,31 @@ class Trainer:
                     self.render()
 
                 self.algorithm.on_iteration_end()
+                self._log_remote(seen, (i + 1) * self.frames_per_batch, i)
                 pbar.update(batch.numel())
                 pbar.set_description(self._describe())
         finally:
             pbar.close()
 
         return self.logs
+
+    def _log_remote(self, seen, frames, iteration):
+        """Send metrics that gained a value this iteration to wandb.
+
+        Evals and renders run on their own cadence, so logging every key each
+        time would flatten the gaps into repeats. Only what actually grew is
+        sent, which also picks up new metrics without touching this method.
+        """
+        if self.wandb_run is None:
+            return
+        row = {
+            key: values[-1]
+            for key, values in self.logs.items()
+            if values and len(values) > seen.get(key, 0)
+        }
+        if row:
+            row["iteration"] = iteration
+            self.wandb_run.log(row, step=frames)
 
     def evaluate(self):
         """Roll the policy out without exploration and log"""
