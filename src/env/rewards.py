@@ -248,9 +248,11 @@ class TwistTrackingReward(RewardShapingBase):
     per-axis kernels pay free credit whenever a command happens to be near
     zero, and standing becomes a strong local optimum.
 
-    ``ang_sigma`` is wider than ``lin_sigma`` because yaw commands span the
-    widest range relative to what the robot can produce; a kernel sharp enough
-    for the linear axes leaves no yaw gradient at the far end of the range.
+    Each axis has its own kernel width, sized to the range it is commanded
+    over: ``lin_sigma`` for vx, ``lat_sigma`` for vy, ``ang_sigma`` for wz. A
+    width borrowed from a wider axis leaves standing still paying too well on
+    the narrow one. Matching the credit a stationary robot earns across axes
+    means sigma ~ c**2 / 4.79, for a typical command ``c``.
 
     ``upright`` gates multiplicatively, so tracking credit is unearnable while
     inverted.
@@ -271,7 +273,9 @@ class TwistTrackingReward(RewardShapingBase):
         command_zero_prob=0.1,
         command_stop_prob=0.15,
         command_straight_prob=0.15,
+        command_strafe_prob=0.0,
         lin_sigma=0.25,
+        lat_sigma=None,
         ang_sigma=0.4,
         w_vx=1.0,
         w_vy=1.0,
@@ -293,7 +297,12 @@ class TwistTrackingReward(RewardShapingBase):
         self.command_zero_prob = command_zero_prob
         self.command_stop_prob = command_stop_prob
         self.command_straight_prob = command_straight_prob
+        self.command_strafe_prob = command_strafe_prob
         self.lin_sigma = lin_sigma
+        # vy gets its own width: a kernel is only as sharp as the range it
+        # was sized for, and sharing lin_sigma across a 3x narrower axis
+        # paid a motionless robot 0.11 there against 0.05 on vx.
+        self.lat_sigma = lin_sigma if lat_sigma is None else lat_sigma
         self.ang_sigma = ang_sigma
         # Per-axis weights. Equal by default: all three axes are commanded, so
         # none is a second-class objective.
@@ -367,17 +376,23 @@ class TwistTrackingReward(RewardShapingBase):
         draw = float(torch.rand(1, generator=generator))
         if draw < self.command_stop_prob:
             return torch.zeros(self.COMMAND_DIM)
-        if draw < self.command_stop_prob + self.command_straight_prob:
-            # Walking straight needs vx non-zero AND both other axes zero, which
-            # independent sampling almost never produces -- v10 saw it on ~8% of
-            # episodes and unlearned it, keeping forward motion only as part of
-            # a turn. Reserved the same way stops are.
-            command = torch.zeros(self.COMMAND_DIM)
-            lo, hi = self.command_ranges[0]
-            command[0] = self._sample_axis(
-                lo, hi, self.command_deadzone[0], generator, allow_zero=False
-            )
-            return command
+        draw -= self.command_stop_prob
+        # Reserved single-axis episodes. Independent sampling almost never
+        # isolates an axis -- lateral demand came with forward demand on 90% of
+        # episodes, and strafing never emerged -- so each reserved axis is drawn
+        # alone at a fixed rate, the way stops are.
+        for axis, prob in (
+            (0, self.command_straight_prob),
+            (1, self.command_strafe_prob),
+        ):
+            if draw < prob:
+                command = torch.zeros(self.COMMAND_DIM)
+                lo, hi = self.command_ranges[axis]
+                command[axis] = self._sample_axis(
+                    lo, hi, self.command_deadzone[axis], generator, allow_zero=False
+                )
+                return command
+            draw -= prob
         return torch.tensor(
             [
                 self._sample_axis(lo, hi, dead, generator)
@@ -498,7 +513,7 @@ class TwistTrackingReward(RewardShapingBase):
         cx, cy, cw = cmd[0], cmd[1], cmd[2]
         return {
             "vx_track": self._axis(vx, cx, self.lin_sigma),
-            "vy_track": self._axis(vy, cy, self.lin_sigma),
+            "vy_track": self._axis(vy, cy, self.lat_sigma),
             "wz_track": self._axis(wz, cw, self.ang_sigma),
             "upright": self.layout.upright(obs).clamp(0.0, 1.0),
             "vx": vx,

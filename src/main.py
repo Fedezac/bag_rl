@@ -201,6 +201,26 @@ def parse_args():
         ),
     )
     p.add_argument(
+        "--twist-strafe-prob",
+        type=float,
+        default=0.0,
+        help=(
+            "share of episodes commanding vy alone, with vx and wz zero. "
+            "Lateral demand otherwise arrives on top of a forward command on "
+            "90%% of episodes, where satisfying vx alone costs little."
+        ),
+    )
+    p.add_argument(
+        "--twist-lat-sigma",
+        type=float,
+        default=None,
+        help=(
+            "tracking kernel width for vy; defaults to the vx width. Size it "
+            "to the vy range: sigma = c**2 / 4.79 for a typical command c "
+            "matches the credit standing still earns on the other axes."
+        ),
+    )
+    p.add_argument(
         "--twist-zero-prob",
         type=float,
         default=0.1,
@@ -390,6 +410,8 @@ def main():
             command_zero_prob=args.twist_zero_prob,
             command_stop_prob=args.twist_stop_prob,
             command_straight_prob=args.twist_straight_prob,
+            command_strafe_prob=args.twist_strafe_prob,
+            lat_sigma=args.twist_lat_sigma,
             idle_weight=args.twist_idle_weight,
             w_vx=w_vx,
             w_vy=w_vy,
