@@ -385,24 +385,42 @@ class TwistTrackingReward(RewardShapingBase):
             ]
         )
 
-    def command_set(self, n, seed=0):
-        """``n`` evaluation commands: axis coverage first, random fill after.
+    # Evaluation probes as (fraction, bound) per axis; "hi"/"lo" picks a sign.
+    _EVAL_PROBES = (
+        (None, None, None),                  # stop
+        ((0.90, "hi"), None, None),          # forward, fast
+        ((0.35, "hi"), None, None),          # forward, slow
+        ((0.90, "lo"), None, None),          # reverse
+        ((0.75, "hi"), None, (0.75, "hi")),  # turn left under way
+        ((0.75, "hi"), None, (0.75, "lo")),  # turn right under way
+        (None, None, (0.90, "hi")),          # spin left in place
+        (None, None, (0.90, "lo")),          # spin right in place
+        (None, (0.90, "hi"), None),          # strafe left
+        (None, (0.90, "lo"), None),          # strafe right
+        ((0.60, "hi"), (0.60, "hi"), None),  # diagonal
+        ((0.50, "hi"), None, (0.40, "hi")),  # gentle arc
+    )
 
-        Independent draws leave axes untested -- one 8-episode set came out
-        with five zero-vx commands, so forward error had almost no room to
-        move and the run read as flat on the axis it had actually lost. The
-        fixed head exercises every axis and sign, largest magnitudes first so
-        a short set still covers them.
+    def command_set(self, n, seed=0):
+        """``n`` evaluation commands, mixed the way the policy is judged.
+
+        One command per axis left 10 of 12 probes at ``vx = 0``, so the score
+        hardly moved when forward tracking did. These combine axes -- a turn
+        carries forward speed -- and give vx the share the training draw does.
+        Probes that collapse onto an earlier one, because an axis has zero
+        span, are dropped rather than repeated.
         """
-        probes = [[0.0] * self.COMMAND_DIM]
-        for frac in (0.9, 0.4):
-            for i, (lo, hi) in enumerate(self.command_ranges):
-                for bound in (hi, lo):
-                    if bound == 0.0:
-                        continue
-                    command = [0.0] * self.COMMAND_DIM
-                    command[i] = frac * bound
-                    probes.append(command)
+        probes = []
+        for spec in self._EVAL_PROBES:
+            command = [0.0] * self.COMMAND_DIM
+            for i, axis in enumerate(spec):
+                if axis is None:
+                    continue
+                frac, bound = axis
+                lo, hi = self.command_ranges[i]
+                command[i] = frac * (hi if bound == "hi" else lo)
+            if command not in probes:
+                probes.append(command)
         g = torch.Generator().manual_seed(seed)
         # Anything past the probes is a plain draw, so the set stays
         # representative of what the policy is actually trained on.
