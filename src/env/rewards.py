@@ -377,20 +377,23 @@ class TwistTrackingReward(RewardShapingBase):
         if draw < self.command_stop_prob:
             return torch.zeros(self.COMMAND_DIM)
         draw -= self.command_stop_prob
-        # Reserved single-axis episodes. Independent sampling almost never
-        # isolates an axis -- lateral demand came with forward demand on 90% of
-        # episodes, and strafing never emerged -- so each reserved axis is drawn
-        # alone at a fixed rate, the way stops are.
-        for axis, prob in (
-            (0, self.command_straight_prob),
-            (1, self.command_strafe_prob),
+        # Reserved episodes, drawn at a fixed rate the way stops are, because
+        # independent sampling almost never isolates an axis. Zeroing every
+        # other axis can ask for a twist the robot cannot produce: with the
+        # heading pinned, Ant reaches 0.07 m/s sideways against a commanded
+        # 0.4, so lateral episodes keep yaw non-zero, which is the regime where
+        # sideways motion exists. Either sign of yaw works.
+        for axis, prob, paired in (
+            (0, self.command_straight_prob, ()),
+            (1, self.command_strafe_prob, (2,)),
         ):
             if draw < prob:
                 command = torch.zeros(self.COMMAND_DIM)
-                lo, hi = self.command_ranges[axis]
-                command[axis] = self._sample_axis(
-                    lo, hi, self.command_deadzone[axis], generator, allow_zero=False
-                )
+                for i in (axis, *paired):
+                    lo, hi = self.command_ranges[i]
+                    command[i] = self._sample_axis(
+                        lo, hi, self.command_deadzone[i], generator, allow_zero=False
+                    )
                 return command
             draw -= prob
         return torch.tensor(
@@ -410,8 +413,8 @@ class TwistTrackingReward(RewardShapingBase):
         ((0.75, "hi"), None, (0.75, "lo")),  # turn right under way
         (None, None, (0.90, "hi")),          # spin left in place
         (None, None, (0.90, "lo")),          # spin right in place
-        (None, (0.90, "hi"), None),          # strafe left
-        (None, (0.90, "lo"), None),          # strafe right
+        (None, (0.90, "hi"), (0.25, "hi")),  # crab left, yaw left free
+        (None, (0.90, "lo"), (0.25, "lo")),  # crab right
         ((0.60, "hi"), (0.60, "hi"), None),  # diagonal
         ((0.50, "hi"), None, (0.40, "hi")),  # gentle arc
     )
