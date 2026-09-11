@@ -154,7 +154,7 @@ class Trainer:
         self.eval_shaper = find_twist_shaper(self.eval_env.transform)
         if self.eval_shaper is not None and self.eval_shaper.command_ranges:
             self.eval_shaper.use_fixed_commands(
-                self.eval_shaper.command_set(self.eval_episodes, seed=self.seed or 0)
+                self.eval_shaper.command_set(self.eval_episodes)
             )
             # Per-axis extents, to put the tracking errors in comparable units
             # before they are averaged into one score. An axis with a zero

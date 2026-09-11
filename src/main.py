@@ -181,13 +181,14 @@ def parse_args():
     )
     p.add_argument(
         "--twist-idle-weight",
-        type=float,
-        default=1.0,
+        default="1.0",
         help=(
             "weight an axis keeps when commanded to zero, as a fraction of its "
             "full weight. 1.0 counts every axis equally regardless of the "
             "command, which pays a motionless robot for whichever axes are "
-            "zero. Lower values make the commanded axes carry the score."
+            "zero. Lower values make the commanded axes carry the score. One "
+            "value for all axes, or 'vx,vy,wz': a low weight on an axis makes "
+            "drifting along it cheap while another axis is being tracked."
         ),
     )
     p.add_argument(
@@ -433,7 +434,7 @@ def main():
             command_straight_prob=args.twist_straight_prob,
             command_strafe_prob=args.twist_strafe_prob,
             lat_sigma=args.twist_lat_sigma,
-            idle_weight=args.twist_idle_weight,
+            idle_weight=_axis_values(args.twist_idle_weight),
             w_vx=w_vx,
             w_vy=w_vy,
             w_wz=w_wz,

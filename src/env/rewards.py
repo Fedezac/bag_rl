@@ -313,8 +313,14 @@ class TwistTrackingReward(RewardShapingBase):
         # full weight. At 1.0 every axis counts the same whatever it was asked
         # for, which pays a motionless robot for the axes that happen to be
         # zero -- 71% of maximum on a straight-line command, where two of the
-        # three are.
-        self.idle_weight = idle_weight
+        # three are. A scalar applies to all three; a triple sets them per
+        # axis, so an axis commanded to zero can stay expensive to violate
+        # while the others relax.
+        self.idle_weight = (
+            (float(idle_weight),) * self.COMMAND_DIM
+            if isinstance(idle_weight, (int, float))
+            else tuple(float(w) for w in idle_weight)
+        )
         spans = (
             [max(abs(lo), abs(hi)) for lo, hi in command_ranges]
             if command_ranges is not None
@@ -413,21 +419,23 @@ class TwistTrackingReward(RewardShapingBase):
 
     # Evaluation probes as (fraction, bound) per axis; "hi"/"lo" picks a sign.
     _EVAL_PROBES = (
-        (None, None, None),                  # stop
-        ((0.90, "hi"), None, None),          # forward, fast
-        ((0.35, "hi"), None, None),          # forward, slow
-        ((0.90, "lo"), None, None),          # reverse
+        (None, None, None),  # stop
+        ((0.90, "hi"), None, None),  # forward, fast
+        ((0.35, "hi"), None, None),  # forward, slow
+        ((0.90, "lo"), None, None),  # reverse
         ((0.75, "hi"), None, (0.75, "hi")),  # turn left under way
         ((0.75, "hi"), None, (0.75, "lo")),  # turn right under way
-        (None, None, (0.90, "hi")),          # spin left in place
-        (None, None, (0.90, "lo")),          # spin right in place
+        (None, None, (0.90, "hi")),  # spin left in place
+        (None, None, (0.90, "lo")),  # spin right in place
         (None, (0.90, "hi"), (0.25, "hi")),  # crab left, yaw left free
-        (None, (0.90, "lo"), (0.25, "lo")),  # crab right
+        # C2 maps (vx, vy, wz) to (-vx, -vy, wz), so the twin of crab left
+        # keeps the yaw sign. Flipping it too asks for a different manoeuvre.
+        (None, (0.90, "lo"), (0.25, "hi")),  # crab right
         ((0.60, "hi"), (0.60, "hi"), None),  # diagonal
         ((0.50, "hi"), None, (0.40, "hi")),  # gentle arc
     )
 
-    def command_set(self, n, seed=0):
+    def command_set(self, n):
         """``n`` evaluation commands, mixed the way the policy is judged.
 
         One command per axis left 10 of 12 probes at ``vx = 0``, so the score
@@ -435,6 +443,10 @@ class TwistTrackingReward(RewardShapingBase):
         carries forward speed -- and give vx the share the training draw does.
         Probes that collapse onto an earlier one, because an axis has zero
         span, are dropped rather than repeated.
+
+        Past one pass the probes repeat. Extra episodes are there to average
+        over reset states -- the crab commands reach two different attractors
+        from different starts -- which a random tail would not do.
         """
         probes = []
         for spec in self._EVAL_PROBES:
@@ -447,11 +459,9 @@ class TwistTrackingReward(RewardShapingBase):
                 command[i] = frac * (hi if bound == "hi" else lo)
             if command not in probes:
                 probes.append(command)
-        g = torch.Generator().manual_seed(seed)
-        # Anything past the probes is a plain draw, so the set stays
-        # representative of what the policy is actually trained on.
-        fill = [self.sample_command(g) for _ in range(max(0, n - len(probes)))]
-        return torch.stack([torch.tensor(c) for c in probes[:n]] + fill)
+        return torch.stack(
+            [torch.tensor(probes[i % len(probes)]) for i in range(n)]
+        )
 
     def use_fixed_commands(self, commands):
         """Cycle a fixed list of commands instead of drawing at random.
@@ -551,12 +561,13 @@ class TwistTrackingReward(RewardShapingBase):
     def _axis_weights(self, obs):
         """Per-axis weight, scaled by how much motion the command demands."""
         base = obs.new_tensor([self.w_vx, self.w_vy, self.w_wz])
-        if self.idle_weight >= 1.0:
+        if all(w >= 1.0 for w in self.idle_weight):
             return base
+        idle = obs.new_tensor(self.idle_weight)
         command = self.command.to(obs.device, obs.dtype)
         span = self.command_span.to(obs.device, obs.dtype)
         demand = (command.abs() / span).clamp(0.0, 1.0)
-        return (base * (self.idle_weight + demand)).clamp_min(1e-6)
+        return (base * (idle + demand)).clamp_min(1e-6)
 
     def after_step(self, next_tensordict):
         # Reward first, from the raw observation, then widen it. Order is not
