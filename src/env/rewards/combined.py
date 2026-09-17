@@ -43,7 +43,7 @@ def gait_twist(env_name="Ant-v5", w_gait=0.5, **twist_kwargs):
 
 
 def gait_twist_sum(env_name="Ant-v5", w_gait=0.5, **twist_kwargs):
-    """The additive predecessor of :func:`gait_twist`"""
+    """Twist plus gait as a plain weighted sum, with no tracking gate."""
     return CompositeReward(
         [
             (1.0, TwistTrackingReward(env_name=env_name, **twist_kwargs)),

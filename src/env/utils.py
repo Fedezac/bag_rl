@@ -40,10 +40,11 @@ def build_reward_transform(env_name, spec):
     if isinstance(spec, Transform):
         return copy.deepcopy(spec)
     factory = REWARD_SHAPERS[spec] if isinstance(spec, str) else spec
-    # Layout-driven shapers need to know WHICH robot they are reading. Without
-    # this the name path built them with their default env_name, so e.g.
-    # `--shaping gait` on Walker2d silently used Ant's offsets and indexed past
-    # the end of a 17-wide observation.
+    # Layout-driven shapers must be told WHICH robot they read, or they fall
+    # back to their default env_name and index another robot's offsets. A
+    # partial that bound env_name by KEYWORD still exposes it here and the
+    # value passed below wins; bound POSITIONALLY it vanishes from the
+    # signature and the partial's own robot silently stands.
     try:
         accepts_env = "env_name" in inspect.signature(factory).parameters
     except (TypeError, ValueError):

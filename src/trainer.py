@@ -154,8 +154,8 @@ class Trainer:
             custom_reward_functions=self.custom_reward_functions,
             constraints=self.constraints,
         )
-        # Pin the eval commands. Redrawing them every eval put the draw's
-        # spread straight into the curve and into checkpoint selection.
+        # Pin the eval commands: a redrawn set puts the draw's spread straight
+        # into the curve and into checkpoint selection.
         self.eval_shaper = find_twist_shaper(self.eval_env.transform)
         if self.eval_shaper is not None and self.eval_shaper.command_ranges:
             self.eval_shaper.use_fixed_commands(
@@ -338,10 +338,9 @@ class Trainer:
         state = self.algorithm.state_dict()
         _torch.save(state, self.checkpoint_dir / "final.pt")
 
-        # Score on how well the commands were actually followed. The shaped
-        # return is the wrong yardstick for a command-conditioned policy: it
-        # mixes tracking with whatever the eval command set happens to weight,
-        # and a set carrying many zero commands ranks a motionless policy top.
+        # Select on tracking error, not shaped return. Shaped return mixes
+        # tracking with whatever the eval command set weights, and a set
+        # carrying many zero commands ranks a motionless policy top.
         if self.logs["eval track score"]:
             current = self.logs["eval track score"][-1]
         else:

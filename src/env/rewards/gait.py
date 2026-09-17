@@ -9,27 +9,20 @@ from src.env.rewards.base import RewardShapingBase
 class GaitReward(RewardShapingBase):
     """Shapes a legged robot toward a clean, phase-correct gait.
 
-    Every term is derived from the observation alone, so the transform stays
-    stateless -- nothing to reset, nothing to special-case for batched envs.
-
-    Observation layout (Ant-v5, each slice verified against ``mujoco`` directly):
-        [0]      torso z
-        [1:5]    torso quaternion (w, x, y, z)
-        [5:13]   8 joint angles
-        [13:16]  torso linear velocity (x, y, z)
-        [16:19]  torso angular velocity
-        [19:27]  8 joint velocities
-        [27:105] cfrc_ext[1:].flatten() -- 13 bodies x 6
+    Every term reads the observation through the robot's
+    :class:`ObservationLayout`, so the transform is stateless and robot-
+    agnostic: nothing to reset, nothing to special-case for batched envs.
 
     The two gait terms are the point of the exercise:
-      * ``trot``   -- diagonal feet should share a phase, and the two diagonal
-        pairs should be in antiphase. That is precisely a trot.
-      * ``stance`` -- peaks at exactly two feet planted, penalising both the
-        four-down shuffle and the zero-down bound.
+      * ``trot``   -- feet within a ``gait_pairs`` group share a phase, and the
+        two groups run in antiphase. For a quadruped that is exactly a trot.
+      * ``stance`` -- peaks at one group's worth of feet planted, penalising
+        both the all-down shuffle and the airborne bound.
     """
 
-    #: Height tolerance as a fraction of nominal standing height. 0.2/0.55 is
-    #: chosen so Ant reproduces the 0.2 it was originally tuned with.
+    #: Height tolerance as a fraction of nominal standing height. Kept as a
+    #: ratio, not folded to a constant: the numerator is the absolute tolerance
+    #: the term was tuned with, the denominator the height it was tuned at.
     HEIGHT_SIGMA_FRAC = 0.2 / 0.55
 
     def __init__(
@@ -70,12 +63,9 @@ class GaitReward(RewardShapingBase):
     def _gait_terms(self, obs):
         """``(phase, stance)``, derived from ``layout.gait_pairs``.
 
-        A gait is a statement about which feet move together and which move
-        opposite. ``gait_pairs`` groups the feet into couplets that should share
-        a phase, and the two groups should be in antiphase -- which for the
-        quadruped grouping ((0, 2), (1, 3)) is exactly a trot, and for the
-        biped grouping ((0,), (1,)) is exactly alternating steps. The same
-        arithmetic covers a hexapod tripod without changing here.
+        ``gait_pairs`` groups feet that should share a phase; the groups run in
+        antiphase. ((0, 2), (1, 3)) is a quadruped trot, ((0,), (1,)) biped
+        alternation, and a hexapod tripod needs no change here.
 
         ``stance`` peaks at one group's worth of feet planted -- two for a
         quadruped trot, one for a biped -- penalising both the all-down shuffle
@@ -131,8 +121,8 @@ class GaitReward(RewardShapingBase):
     def terms(self, obs):
         """Individual reward terms, kept separate so they can be logged.
 
-        Velocities stay in the WORLD frame here, as they were, so the numbers
-        this produces are identical to the runs already recorded against it.
+        Velocities are WORLD-frame, unlike :class:`TwistTrackingReward`'s: the
+        posture terms here are direction-agnostic, so no rotation is needed.
         """
         L = self.layout
         z = L.torso_height(obs)
@@ -155,7 +145,8 @@ class GaitReward(RewardShapingBase):
 
     def shaping(self, tensordict, next_tensordict):
         t = self.terms(next_tensordict["observation"])
-        # ``upright`` to penalize if ant is trotting on its "back"
+        # Gate on ``upright``: an inverted robot earns none of the posture or
+        # gait credit, however good its contact pattern looks.
         earned = (
             self.w_speed * t["speed"]
             + self.w_height * t["height"]
@@ -169,6 +160,6 @@ class GaitReward(RewardShapingBase):
         )
 
 
-#: The gait shaper was quadruped-only when it was written; the name is kept so
-#: existing configs and the recorded ant_gait runs still resolve.
+#: Alias kept so recorded configs naming ``ant_gait`` still resolve. The class
+#: itself is robot-agnostic.
 AntGaitReward = GaitReward

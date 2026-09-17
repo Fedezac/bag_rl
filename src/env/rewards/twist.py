@@ -10,31 +10,20 @@ from src.env.rewards.base import RewardShapingBase
 class TwistTrackingReward(RewardShapingBase):
     """Track a commanded body-frame twist, *replacing* the env task reward.
 
-    The command ``(vx, vy, wz)`` is body-fixed at the centre of mass: vx is
-    forward along the robot's own heading, vy sideways, wz the yaw rate about
-    its own vertical. See :meth:`ObservationLayout.body_twist` for why the
-    observation's world-frame velocities have to be rotated to compare against
-    it.
+    ``(vx, vy, wz)`` is body-fixed at the centre of mass: vx forward along the
+    robot's heading, vy sideways, wz yaw rate about its own vertical. The
+    observation carries world-frame velocities, so
+    :meth:`ObservationLayout.body_twist` rotates them first.
 
-    Each axis gets its OWN Gaussian kernel on its own error. Sharing one kernel
-    between vx and vy couples their gradients: while vx is badly wrong the
-    shared exponential is near zero, and vy is invisible to the optimiser
-    regardless of its own error.
+    Each axis has its own Gaussian kernel and its own width. One shared
+    exponential sits near zero while any single axis is badly wrong, hiding the
+    others from the optimiser; a width borrowed from a wider axis overpays
+    standing still on a narrow one (equal standing credit across axes needs
+    ``sigma ~ c**2 / 4.79`` for a typical command ``c``). Each kernel is then
+    normalised by what standing still earns under that command, so the score
+    measures progress rather than proximity.
 
-    Each axis is scored against what standing still would earn for its own
-    command, so a stationary robot scores ~0 on any axis it is asked to move
-    and the reward measures progress rather than proximity. Without this,
-    per-axis kernels pay free credit whenever a command happens to be near
-    zero, and standing becomes a strong local optimum.
-
-    Each axis has its own kernel width, sized to the range it is commanded
-    over: ``lin_sigma`` for vx, ``lat_sigma`` for vy, ``ang_sigma`` for wz. A
-    width borrowed from a wider axis leaves standing still paying too well on
-    the narrow one. Matching the credit a stationary robot earns across axes
-    means sigma ~ c**2 / 4.79, for a typical command ``c``.
-
-    ``upright`` gates multiplicatively, so tracking credit is unearnable while
-    inverted.
+    ``upright`` gates multiplicatively: no credit while inverted.
     """
 
     replaces_task_reward = True
@@ -78,9 +67,8 @@ class TwistTrackingReward(RewardShapingBase):
         self.command_straight_prob = command_straight_prob
         self.command_strafe_prob = command_strafe_prob
         self.lin_sigma = lin_sigma
-        # vy gets its own width: a kernel is only as sharp as the range it
-        # was sized for, and sharing lin_sigma across a 3x narrower axis
-        # paid a motionless robot 0.11 there against 0.05 on vx.
+        # vy gets its own width: a kernel is only as sharp as the range it was
+        # sized for, so a narrower axis sharing lin_sigma overpays standing.
         self.lat_sigma = lin_sigma if lat_sigma is None else lat_sigma
         self.ang_sigma = ang_sigma
         # Per-axis weights. Equal by default: all three axes are commanded, so
@@ -89,12 +77,10 @@ class TwistTrackingReward(RewardShapingBase):
         self.w_vy = w_vy
         self.w_wz = w_wz
         # Weight an axis keeps when commanded to zero, as a fraction of its
-        # full weight. At 1.0 every axis counts the same whatever it was asked
-        # for, which pays a motionless robot for the axes that happen to be
-        # zero -- 71% of maximum on a straight-line command, where two of the
-        # three are. A scalar applies to all three; a triple sets them per
-        # axis, so an axis commanded to zero can stay expensive to violate
-        # while the others relax.
+        # full weight. 1.0 counts every axis the same whatever it was asked
+        # for, which pays a motionless robot for whichever axes are zero. A
+        # scalar applies to all three; a triple sets them per axis, so one axis
+        # can stay expensive to violate at rest while the others relax.
         self.idle_weight = (
             (float(idle_weight),) * self.COMMAND_DIM
             if isinstance(idle_weight, (int, float))
@@ -160,11 +146,9 @@ class TwistTrackingReward(RewardShapingBase):
     def sample_command(self, generator=None):
         """Draw one command from the configured ranges.
 
-        Stops are drawn jointly. Zeroing axes independently makes a full stop
-        vanishingly rare -- at a 0.3 per-axis rate only 2.8% of episodes are
-        one -- while every single-axis zero still pays a stationary robot, so
-        the cost of teaching the robot to stop lands almost entirely on the
-        reward floor rather than on the behaviour.
+        Stops are drawn jointly, not by zeroing axes independently: independent
+        draws make a full stop exponentially rare while every single-axis zero
+        still pays a stationary robot.
         """
         draw = float(torch.rand(1, generator=generator))
         if draw < self.command_stop_prob:
@@ -172,10 +156,9 @@ class TwistTrackingReward(RewardShapingBase):
         draw -= self.command_stop_prob
         # Reserved episodes, drawn at a fixed rate the way stops are, because
         # independent sampling almost never isolates an axis. Zeroing every
-        # other axis can ask for a twist the robot cannot produce: with the
-        # heading pinned, Ant reaches 0.07 m/s sideways against a commanded
-        # 0.4, so lateral episodes keep yaw non-zero, which is the regime where
-        # sideways motion exists. Either sign of yaw works.
+        # other axis can ask for a twist the robot cannot produce -- pure
+        # sideways motion with the heading pinned is near-infeasible for a
+        # quadruped -- so lateral episodes keep yaw non-zero, either sign.
         for axis, prob, paired in (
             (0, self.command_straight_prob, ()),
             (1, self.command_strafe_prob, (2,)),
@@ -217,15 +200,14 @@ class TwistTrackingReward(RewardShapingBase):
     def command_set(self, n):
         """``n`` evaluation commands, mixed the way the policy is judged.
 
-        One command per axis left 10 of 12 probes at ``vx = 0``, so the score
-        hardly moved when forward tracking did. These combine axes -- a turn
-        carries forward speed -- and give vx the share the training draw does.
-        Probes that collapse onto an earlier one, because an axis has zero
-        span, are dropped rather than repeated.
+        Probes combine axes -- a turn carries forward speed -- so vx gets the
+        share the training draw gives it. One command per axis would leave most
+        probes at ``vx = 0``. Probes that collapse onto an earlier one, because
+        an axis has zero span, are dropped rather than repeated.
 
-        Past one pass the probes repeat. Extra episodes are there to average
-        over reset states -- the crab commands reach two different attractors
-        from different starts -- which a random tail would not do.
+        Past one pass the probes repeat rather than drawing at random: extra
+        episodes exist to average over reset states, which a random tail would
+        not do.
         """
         probes = []
         for spec in self._EVAL_PROBES:
@@ -245,10 +227,9 @@ class TwistTrackingReward(RewardShapingBase):
     def use_fixed_commands(self, commands):
         """Cycle a fixed list of commands instead of drawing at random.
 
-        Evaluation redrew its commands every time, so the eval number moved
-        with the draw as much as with the policy -- a single episode of a
-        motionless policy spans 749-4242 on this reward. A fixed set makes
-        successive evals comparable, which is what checkpoint selection needs.
+        A redrawn command set moves the eval number as much as the policy
+        does. Pinning the set makes successive evals comparable, which is what
+        checkpoint selection needs.
         """
         self._fixed_commands = commands
         self._fixed_index = 0
@@ -344,14 +325,13 @@ class TwistTrackingReward(RewardShapingBase):
         command = self.command.to(obs.device, obs.dtype)
         span = self.command_span.to(obs.device, obs.dtype)
         demand = (command.abs() / span).clamp(0.0, 1.0)
-        # Interpolate rather than add, so an axis at full demand is worth its
-        # base weight whatever its idle value. Adding the two coupled them:
-        # raising the floor on an axis also raised what it earned when
-        # commanded, which tilted the whole task toward that axis.
+        # Interpolate rather than add: adding couples the two, so raising an
+        # axis's idle floor also raises what it earns when commanded. Here an
+        # axis at full demand is worth its base weight at any idle value.
         return (base * (idle + (1.0 - idle) * demand)).clamp_min(1e-6)
 
     def after_step(self, next_tensordict):
-        # Reward first, from the raw observation, then widen it. Order is not
-        # actually load-bearing -- every accessor indexes from the front -- but
-        # computing the reward before mutating what it read keeps it obvious.
+        # Reward first, from the raw observation, then widen it. Accessors all
+        # index from the front, so order is not load-bearing -- but scoring
+        # before mutating what was scored keeps that obvious.
         return self._append_command(next_tensordict)

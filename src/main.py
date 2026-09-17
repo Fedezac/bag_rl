@@ -99,8 +99,8 @@ def parse_args():
         type=float,
         default=0.0,
         help=(
-            "entropy bonus coefficient. Off by default: a large sweep found no "
-            "task where it helped. Exploration comes from the policy std."
+            "entropy bonus coefficient. Off by default; exploration comes from "
+            "the policy std, which is learned."
         ),
     )
     p.add_argument(
@@ -132,9 +132,10 @@ def parse_args():
         choices=sorted(REWARD_SHAPERS),
         default=None,
         help=(
-            "reward-shaping term to add. Env-specific: 'ant_gait' expects "
-            "Ant-v5, 'humanoid_upright' expects Humanoid-v5. Off by default, "
-            "so the true task reward is used."
+            "reward-shaping term to add. Every term reads the robot through "
+            "its registered observation layout, so any env with one works; "
+            "'humanoid_upright' is the exception and targets Humanoid. Off by "
+            "default, so the true task reward is used."
         ),
     )
     p.add_argument(

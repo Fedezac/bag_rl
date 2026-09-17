@@ -6,10 +6,9 @@ from src.env.rewards.base import CompositeReward, RewardShapingBase
 class ActionCostReward(RewardShapingBase):
     """Penalises torque magnitude and torque CHANGE between steps.
 
-    Nothing else in the stack charges for effort: the twist shaper replaces the
-    env reward, which takes Ant's own ``ctrl_cost`` with it. Without this a
-    policy pays nothing for bang-bang torque, and flinging is the cheapest way
-    to hit a velocity target.
+    Nothing else charges for effort: a shaper with ``replaces_task_reward``
+    discards the env reward and its ``ctrl_cost`` with it, so without this term
+    torque and chatter are free.
 
     Both terms are means over joints rather than sums, so a weight keeps its
     meaning on a robot with a different joint count.

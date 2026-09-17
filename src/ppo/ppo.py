@@ -162,8 +162,7 @@ class PPO(Algorithm):
             actor_layers += [head, NormalParamExtractor()]
         # Shrinking the last policy layer starts the agent near zero mean
         # action, so early exploration comes from the std rather than from
-        # whatever the random head happened to prefer. Highest-impact single
-        # initialisation choice in the study.
+        # whatever the random head happened to prefer.
         _scale_layer(head, policy_final_layer_scale)
         self.actor_net = nn.Sequential(*actor_layers).to(self.device)
         self.policy_module = ProbabilisticActor(
@@ -322,8 +321,8 @@ class PPO(Algorithm):
         if num_iterations and self.lr_schedule != "constant":
             steps = max(1, num_iterations)
             self.scheduler = (
-                # Linear decay to zero: the schedule the study measured a
-                # (small) gain from.
+                # Linear decay to zero over the whole run, so the last
+                # updates are the smallest.
                 torch.optim.lr_scheduler.LinearLR(
                     self.optim, start_factor=1.0, end_factor=0.0, total_iters=steps
                 )

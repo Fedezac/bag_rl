@@ -50,11 +50,10 @@ class LagrangeMultiplier(nn.Module):
         super().__init__()
         self._floor = floor
         # ``init_value`` is the initial MULTIPLIER, not the raw parameter, so
-        # it has to be pushed through the inverse of softplus. Passing it
-        # straight in would make init_value=0.0 mean lambda=softplus(0)=0.69 --
-        # a run asked to start unconstrained would start with real constraint
-        # pressure instead. log(exp(0) - 1) is -inf, so the floor stands in for
-        # "effectively zero".
+        # it goes through the inverse of softplus: passed straight in, 0.0
+        # would mean lambda=softplus(0)=0.69, i.e. real constraint pressure on
+        # a run asked to start unconstrained. log(exp(0) - 1) is -inf, so the
+        # floor stands in for "effectively zero".
         self.nu = nn.Parameter(torch.tensor(_inverse_softplus(init_value, floor)))
         self.cost_limit = float(cost_limit)
         self.max_value = max_value
