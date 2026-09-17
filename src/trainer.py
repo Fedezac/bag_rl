@@ -19,6 +19,11 @@ def _spec_name(spec):
     """Readable name for a shaping spec that may be a string or a partial."""
     if spec is None or isinstance(spec, str):
         return spec
+    # A wrapper like ``with_action_cost`` carries the shaper it wraps as its
+    # first argument; report the shaper, so runs stay sortable by family.
+    args = getattr(spec, "args", ())
+    if args and callable(args[0]):
+        return _spec_name(args[0])
     func = getattr(spec, "func", spec)
     return getattr(func, "__name__", type(func).__name__)
 

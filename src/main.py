@@ -18,6 +18,7 @@ from src.env.rewards import (  # noqa: E402
     TwistTrackingReward,
     gait_twist,
     gait_twist_sum,
+    with_action_cost,
 )
 from src.ppo import PPO  # noqa: E402
 from src.trainer import Trainer  # noqa: E402
@@ -250,6 +251,26 @@ def parse_args():
         ),
     )
     p.add_argument(
+        "--torque-weight",
+        type=float,
+        default=0.0,
+        help=(
+            "penalty on mean squared action, subtracted from the reward. "
+            "The twist shaping replaces the env reward and drops Ant's own "
+            "ctrl_cost with it, so at 0 nothing charges for effort."
+        ),
+    )
+    p.add_argument(
+        "--action-rate-weight",
+        type=float,
+        default=0.0,
+        help=(
+            "penalty on mean squared action CHANGE between consecutive steps. "
+            "Charges for chattering rather than for effort, which is what a "
+            "ballistic gait actually does."
+        ),
+    )
+    p.add_argument(
         "--obs-clip",
         type=float,
         default=10.0,
@@ -445,6 +466,13 @@ def main():
             shaping = partial(gait_twist_sum, w_gait=args.gait_weight, **kw)
         else:
             shaping = partial(TwistTrackingReward, **kw)
+        if args.torque_weight or args.action_rate_weight:
+            shaping = partial(
+                with_action_cost,
+                shaping,
+                w_torque=args.torque_weight,
+                w_action_rate=args.action_rate_weight,
+            )
 
     algorithm = PPO(
         args.env_name,
