@@ -36,12 +36,10 @@ CONTACT_BODIES = (
     + FOOT_BODIES
 )
 
-DEFAULT_CAMERA_CONFIG = {
-    "trackbodyid": 1,
-    "distance": 4.0,
-    "lookat": np.array([0.0, 0.0, 0.6]),
-    "elevation": -20.0,
-}
+# Tracking is done by the model's own "track" camera, not by
+# default_camera_config: gymnasium rewrites cam.type on every render() call
+# from the camera id, which silently undoes a trackbodyid set here.
+TRACKING_CAMERA = "track"
 
 
 class KyonEnv(MujocoEnv, utils.EzPickle):
@@ -80,9 +78,9 @@ class KyonEnv(MujocoEnv, utils.EzPickle):
         self._healthy_reward = healthy_reward
         self._ctrl_cost_weight = ctrl_cost_weight
 
+        kwargs.setdefault("camera_name", TRACKING_CAMERA)
         MujocoEnv.__init__(
-            self, xml_file, frame_skip, observation_space=None,
-            default_camera_config=DEFAULT_CAMERA_CONFIG, **kwargs,
+            self, xml_file, frame_skip, observation_space=None, **kwargs,
         )
 
         model = self.model

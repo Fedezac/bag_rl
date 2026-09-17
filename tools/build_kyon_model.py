@@ -102,6 +102,19 @@ def restrict_collisions(root):
             geom.set("conaffinity", "0")
 
 
+def add_tracking_camera(root):
+    """A camera that follows the robot, defined in the model.
+
+    Gymnasium's renderer rewrites ``cam.type`` on every render() call from the
+    camera_id it was given, so a ``trackbodyid`` passed through
+    ``default_camera_config`` is silently clobbered and the robot walks out of
+    frame. A named MJCF camera survives that, because it is selected *by* id.
+    """
+    pelvis = root.find("worldbody/body[@name='pelvis']")
+    ET.SubElement(pelvis, "camera", name="track", mode="trackcom",
+                  pos="0 -3.5 1.4", xyaxes="1 0 0 0 0.35 0.94")
+
+
 def joint_ranges(root):
     return {j.get("name"): (j.get("range"), j.get("actuatorfrcrange"))
             for j in root.iter("joint") if j.get("type") != "free"}
@@ -179,6 +192,7 @@ def main():
     replace_floor(root)
     tune_joints(root)
     restrict_collisions(root)
+    add_tracking_camera(root)
     add_actuators(root)
 
     out = out_dir / "kyon.xml"
