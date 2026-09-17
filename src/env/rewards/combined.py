@@ -10,12 +10,21 @@ class TrackingGatedGait(RewardShapingBase):
 
     replaces_task_reward = True
 
-    def __init__(self, env_name, w_gait=0.5, **twist_kwargs):
+    def __init__(self, env_name, w_gait=0.5, gait_weights=None, **twist_kwargs):
         super().__init__()
         self.twist = TwistTrackingReward(env_name=env_name, **twist_kwargs)
         # Speed / lateral / yaw are the twist term's job; leaving them on would
         # be scoring the same quantity twice with two different kernels.
-        self.gait = GaitReward(env_name=env_name, w_speed=0.0, w_lateral=0.0, w_yaw=0.0)
+        height, trot, stance = gait_weights or (1.0, 0.5, 0.3)
+        self.gait = GaitReward(
+            env_name=env_name,
+            w_speed=0.0,
+            w_lateral=0.0,
+            w_yaw=0.0,
+            w_height=height,
+            w_trot=trot,
+            w_stance=stance,
+        )
         self.w_gait = w_gait
         # Normalises the gate to [0, 1] so w_gait keeps its meaning: the value
         # of a perfect gait relative to perfect tracking.
@@ -37,9 +46,11 @@ class TrackingGatedGait(RewardShapingBase):
         return self.twist.transform_observation_spec(observation_spec)
 
 
-def gait_twist(env_name, w_gait=0.5, **twist_kwargs):
+def gait_twist(env_name, w_gait=0.5, gait_weights=None, **twist_kwargs):
     """Track a commanded twist while keeping a clean gait."""
-    return TrackingGatedGait(env_name=env_name, w_gait=w_gait, **twist_kwargs)
+    return TrackingGatedGait(
+        env_name=env_name, w_gait=w_gait, gait_weights=gait_weights, **twist_kwargs
+    )
 
 
 def gait_twist_sum(env_name, w_gait=0.5, **twist_kwargs):

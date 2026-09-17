@@ -236,6 +236,16 @@ def parse_args():
         ),
     )
     p.add_argument(
+        "--gait-weights",
+        default=None,
+        help=(
+            "per-term gait weights as 'height,trot,stance' (default "
+            "'1.0,0.5,0.3'). height saturates early and dominates the gait "
+            "bonus, so raising trot/stance is what buys contact-pattern "
+            "pressure."
+        ),
+    )
+    p.add_argument(
         "--torque-weight",
         type=float,
         default=0.0,

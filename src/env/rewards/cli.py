@@ -38,6 +38,16 @@ def parse_ranges(spec):
     return ranges
 
 
+def gait_weights(spec):
+    """``'1.0,0.5,0.3'`` -> ``(height, trot, stance)``, or ``None`` for defaults."""
+    if not spec:
+        return None
+    parts = tuple(float(v) for v in str(spec).split(","))
+    if len(parts) != 3:
+        raise SystemExit("--gait-weights needs three values: height,trot,stance")
+    return parts
+
+
 def build_shaping(args):
     """The ``custom_reward_functions`` spec for ``args``.
 
@@ -70,7 +80,12 @@ def build_shaping(args):
     )
 
     if shaping == "gait_twist":
-        spec = partial(gait_twist, w_gait=args.gait_weight, **kw)
+        spec = partial(
+            gait_twist,
+            w_gait=args.gait_weight,
+            gait_weights=gait_weights(getattr(args, "gait_weights", None)),
+            **kw,
+        )
     elif shaping == "gait_twist_sum":
         spec = partial(gait_twist_sum, w_gait=args.gait_weight, **kw)
     else:
