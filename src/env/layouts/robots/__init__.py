@@ -5,5 +5,6 @@ from src.env.layouts.robots import (  # noqa: F401
     halfcheetah,
     hopper,
     humanoid,
+    kyon,
     walker2d,
 )

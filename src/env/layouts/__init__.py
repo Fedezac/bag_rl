@@ -15,6 +15,7 @@ from src.env.layouts.robots.ant import ANT_V5  # noqa: E402
 from src.env.layouts.robots.halfcheetah import HALFCHEETAH_V5  # noqa: E402
 from src.env.layouts.robots.hopper import HOPPER_V5  # noqa: E402
 from src.env.layouts.robots.humanoid import HUMANOID_V5  # noqa: E402
+from src.env.layouts.robots.kyon import KYON_V1  # noqa: E402
 from src.env.layouts.robots.walker2d import WALKER2D_V5  # noqa: E402
 
 __all__ = [
@@ -22,6 +23,7 @@ __all__ = [
     "HALFCHEETAH_V5",
     "HOPPER_V5",
     "HUMANOID_V5",
+    "KYON_V1",
     "LAYOUTS",
     "ObservationLayout",
     "WALKER2D_V5",
