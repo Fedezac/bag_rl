@@ -561,13 +561,15 @@ class TwistTrackingReward(RewardShapingBase):
     def _axis_weights(self, obs):
         """Per-axis weight, scaled by how much motion the command demands."""
         base = obs.new_tensor([self.w_vx, self.w_vy, self.w_wz])
-        if all(w >= 1.0 for w in self.idle_weight):
-            return base
         idle = obs.new_tensor(self.idle_weight)
         command = self.command.to(obs.device, obs.dtype)
         span = self.command_span.to(obs.device, obs.dtype)
         demand = (command.abs() / span).clamp(0.0, 1.0)
-        return (base * (idle + demand)).clamp_min(1e-6)
+        # Interpolate rather than add, so an axis at full demand is worth its
+        # base weight whatever its idle value. Adding the two coupled them:
+        # raising the floor on an axis also raised what it earned when
+        # commanded, which tilted the whole task toward that axis.
+        return (base * (idle + (1.0 - idle) * demand)).clamp_min(1e-6)
 
     def after_step(self, next_tensordict):
         # Reward first, from the raw observation, then widen it. Order is not
