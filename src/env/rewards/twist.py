@@ -28,11 +28,13 @@ class TwistTrackingReward(RewardShapingBase):
 
     replaces_task_reward = True
 
+    name = "twist"
+
     COMMAND_DIM = 3
 
     def __init__(
         self,
-        env_name="Ant-v5",
+        env_name,
         vx=1.0,
         vy=0.0,
         wz=0.0,

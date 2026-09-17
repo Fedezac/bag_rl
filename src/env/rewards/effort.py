@@ -41,7 +41,7 @@ class ActionCostReward(RewardShapingBase):
         return tensordict_reset
 
 
-def with_action_cost(base, env_name="Ant-v5", w_torque=0.0, w_action_rate=0.0):
+def with_action_cost(base, env_name, w_torque=0.0, w_action_rate=0.0):
     """``base`` plus effort penalties, or ``base`` untouched if both are zero.
 
     The penalties are added, never gated on tracking the way the gait bonus is:

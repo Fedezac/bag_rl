@@ -29,13 +29,9 @@ from torchrl.envs.utils import (  # noqa: E402
 )
 
 from src.env.rewards import (  # noqa: E402
-    CompositeReward,
-    GaitReward,
-    TrackingGatedGait,
-    TwistTrackingReward,
+    REWARD_SHAPERS,
+    find_gait_shaper,
     find_twist_shaper,
-    gait_twist,
-    gait_twist_sum,
 )
 from src.env.utils import make_single_env  # noqa: E402
 from src.ppo import PPO  # noqa: E402
@@ -112,24 +108,6 @@ def parse_script(spec):
     return script
 
 
-def find_gait_shaper(transform):
-    """The gait member, for its contact threshold. ``None`` if twist-only."""
-    if isinstance(transform, GaitReward):
-        return transform
-    if isinstance(transform, TrackingGatedGait):
-        return transform.gait
-    if isinstance(transform, CompositeReward):
-        for _, member in transform.members:
-            found = find_gait_shaper(member)
-            if found is not None:
-                return found
-    for child in getattr(transform, "transforms", []):
-        found = find_gait_shaper(child)
-        if found is not None:
-            return found
-    return None
-
-
 def load_font(size):
     from PIL import ImageFont
 
@@ -199,11 +177,9 @@ def main():
     torch.manual_seed(args.seed)
     script = DEFAULT_SCRIPT if args.script is None else parse_script(args.script)
 
-    builder = {
-        "gait_twist": partial(gait_twist, w_gait=args.gait_weight),
-        "gait_twist_sum": partial(gait_twist_sum, w_gait=args.gait_weight),
-        "twist": TwistTrackingReward,
-    }[args.shaping]
+    builder = REWARD_SHAPERS[args.shaping]
+    if args.shaping.startswith("gait_twist"):
+        builder = partial(builder, w_gait=args.gait_weight)
     shaping = partial(builder, env_name=args.env_name)
 
     # Warmup off: the observation statistics come from the checkpoint, and
@@ -285,7 +261,7 @@ def main():
                     # The other half of the objective. Tracking numbers alone
                     # cannot tell a trot from a controlled belly-slide at the
                     # right velocity.
-                    phase, stance = gait._gait_terms(obs)
+                    phase, stance = gait.gait_terms(obs)
                     row["phase"] = float(phase)
                     row["stance"] = float(stance)
                 trace.append(row)

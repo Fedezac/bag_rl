@@ -13,25 +13,9 @@ import torch  # noqa: E402
 from torch import multiprocessing  # noqa: E402
 
 from src.env.constraints import CONSTRAINT_TERMS  # noqa: E402
-from src.env.rewards import (  # noqa: E402
-    REWARD_SHAPERS,
-    TwistTrackingReward,
-    gait_twist,
-    gait_twist_sum,
-    with_action_cost,
-)
+from src.env.rewards import REWARD_SHAPERS, build_shaping  # noqa: E402
 from src.ppo import PPO  # noqa: E402
 from src.trainer import Trainer  # noqa: E402
-
-
-def _axis_values(spec):
-    """``'0.5'`` -> 0.5; ``'0.2,0.5,0.5'`` -> a per-axis triple."""
-    parts = [float(v) for v in str(spec).split(",")]
-    if len(parts) == 1:
-        return parts[0]
-    if len(parts) != 3:
-        raise SystemExit("expected one value or three, as 'vx,vy,wz'")
-    return tuple(parts)
 
 
 def parse_args():
@@ -426,54 +410,7 @@ def main():
     if args.seed is not None:
         torch.manual_seed(args.seed)
 
-    # A twist shaper needs the robot's layout and the command bound in. Passed
-    # as a partial rather than a name so it stays picklable for the collector
-    # workers, which re-create their envs in their own processes.
-    shaping = args.shaping
-    if shaping in ("twist", "gait_twist", "gait_twist_sum"):
-        vx, vy, wz = (float(v) for v in args.twist.split(","))
-        ranges = None
-        if args.twist_range:
-            ranges = tuple(
-                tuple(float(x) for x in part.split(":"))
-                for part in args.twist_range.split(",")
-            )
-            if len(ranges) != 3 or any(len(r) != 2 for r in ranges):
-                raise SystemExit(
-                    "--twist-range needs three lo:hi pairs, e.g. "
-                    "'-0.5:1.5,-0.5:0.5,-1:1'"
-                )
-        w_vx, w_vy, w_wz = (float(v) for v in args.twist_weights.split(","))
-        kw = dict(
-            env_name=args.env_name,
-            vx=vx,
-            vy=vy,
-            wz=wz,
-            command_ranges=ranges,
-            command_deadzone=_axis_values(args.twist_deadzone),
-            command_zero_prob=args.twist_zero_prob,
-            command_stop_prob=args.twist_stop_prob,
-            command_straight_prob=args.twist_straight_prob,
-            command_strafe_prob=args.twist_strafe_prob,
-            lat_sigma=args.twist_lat_sigma,
-            idle_weight=_axis_values(args.twist_idle_weight),
-            w_vx=w_vx,
-            w_vy=w_vy,
-            w_wz=w_wz,
-        )
-        if shaping == "gait_twist":
-            shaping = partial(gait_twist, w_gait=args.gait_weight, **kw)
-        elif shaping == "gait_twist_sum":
-            shaping = partial(gait_twist_sum, w_gait=args.gait_weight, **kw)
-        else:
-            shaping = partial(TwistTrackingReward, **kw)
-        if args.torque_weight or args.action_rate_weight:
-            shaping = partial(
-                with_action_cost,
-                shaping,
-                w_torque=args.torque_weight,
-                w_action_rate=args.action_rate_weight,
-            )
+    shaping = build_shaping(args)
 
     algorithm = PPO(
         args.env_name,

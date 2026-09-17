@@ -10,7 +10,7 @@ class TrackingGatedGait(RewardShapingBase):
 
     replaces_task_reward = True
 
-    def __init__(self, env_name="Ant-v5", w_gait=0.5, **twist_kwargs):
+    def __init__(self, env_name, w_gait=0.5, **twist_kwargs):
         super().__init__()
         self.twist = TwistTrackingReward(env_name=env_name, **twist_kwargs)
         # Speed / lateral / yaw are the twist term's job; leaving them on would
@@ -37,12 +37,12 @@ class TrackingGatedGait(RewardShapingBase):
         return self.twist.transform_observation_spec(observation_spec)
 
 
-def gait_twist(env_name="Ant-v5", w_gait=0.5, **twist_kwargs):
+def gait_twist(env_name, w_gait=0.5, **twist_kwargs):
     """Track a commanded twist while keeping a clean gait."""
     return TrackingGatedGait(env_name=env_name, w_gait=w_gait, **twist_kwargs)
 
 
-def gait_twist_sum(env_name="Ant-v5", w_gait=0.5, **twist_kwargs):
+def gait_twist_sum(env_name, w_gait=0.5, **twist_kwargs):
     """Twist plus gait as a plain weighted sum, with no tracking gate."""
     return CompositeReward(
         [

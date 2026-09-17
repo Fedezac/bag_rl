@@ -20,6 +20,8 @@ class GaitReward(RewardShapingBase):
         both the all-down shuffle and the airborne bound.
     """
 
+    name = "gait"
+
     #: Height tolerance as a fraction of nominal standing height. Kept as a
     #: ratio, not folded to a constant: the numerator is the absolute tolerance
     #: the term was tuned with, the denominator the height it was tuned at.
@@ -27,7 +29,7 @@ class GaitReward(RewardShapingBase):
 
     def __init__(
         self,
-        env_name="Ant-v5",
+        env_name,
         target_speed=2.0,
         target_height=None,
         contact_threshold=0.3,
@@ -60,7 +62,7 @@ class GaitReward(RewardShapingBase):
         self.w_yaw = w_yaw
         self.speed_sigma = speed_sigma
 
-    def _gait_terms(self, obs):
+    def gait_terms(self, obs):
         """``(phase, stance)``, derived from ``layout.gait_pairs``.
 
         ``gait_pairs`` groups feet that should share a phase; the groups run in
@@ -131,7 +133,7 @@ class GaitReward(RewardShapingBase):
         wz = L.yaw_rate(obs)
         up_z = L.upright(obs)
 
-        trot, stance = self._gait_terms(obs)
+        trot, stance = self.gait_terms(obs)
 
         return {
             "speed": torch.exp(-(((vx - self.target_speed) / self.speed_sigma) ** 2)),
