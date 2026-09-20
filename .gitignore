@@ -9,3 +9,6 @@ TODO.*
 todo.*
 # wandb run data (streamed to the server; nothing to version here)
 wandb/
+# Robot meshes and the MJCF built from them: IIT-owned geometry, kept out
+# of the repo. Rebuild with tools/build_kyon_model.py.
+src/env/assets/

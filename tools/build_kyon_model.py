@@ -6,7 +6,8 @@ all -- the real stack does its PD outside MuJoCo -- so nothing can be
 commanded. It also carries a 5 kHz timestep, a floor a metre below the origin
 and ``<size njmax>``, which MuJoCo 3 rejects.
 
-Run once; re-run when the URDF changes.
+Run once; re-run when the URDF changes. The output (``src/env/assets/kyon``,
+meshes included) is gitignored, so this is the only way to get it.
 """
 
 import argparse
