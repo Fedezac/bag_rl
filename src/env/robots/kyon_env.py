@@ -25,6 +25,9 @@ LEG_JOINTS = [
     for j in ("hip_roll", "hip_pitch", "knee_pitch")
 ]
 FOOT_BODIES = [f"contact_{i}" for i in (1, 2, 3, 4)]
+# The contact spheres are geoms of the same name. Their centres are what
+# touches the ground, so that is the point a slip term wants the velocity of.
+FOOT_GEOMS = list(FOOT_BODIES)
 # Bodies whose external forces enter the observation. The feet come last, so
 # the layout's foot_rows are 13..16. Everything else here is a body that should
 # never be carrying load -- which is exactly the non_foot_contact signal.
@@ -60,6 +63,9 @@ class KyonEnv(MujocoEnv, utils.EzPickle):
         # non_foot_contact cost's 1.0 limit are both calibrated to it. Raw
         # Newtons here would read as permanent contact on every body.
         contact_force_range=(-1.0, 1.0),
+        # Append each foot's world-frame linear velocity to the observation.
+        # Off by default so Kyon-v1 keeps the 137-vector its layout describes.
+        foot_velocities=False,
         forward_reward_weight=1.0,
         healthy_reward=1.0,
         ctrl_cost_weight=0.005,
@@ -68,12 +74,14 @@ class KyonEnv(MujocoEnv, utils.EzPickle):
         utils.EzPickle.__init__(
             self, xml_file, frame_skip, action_scale, healthy_upright,
             healthy_z_fraction, reset_noise_scale, contact_force_range,
-            forward_reward_weight, healthy_reward, ctrl_cost_weight, **kwargs,
+            foot_velocities, forward_reward_weight, healthy_reward,
+            ctrl_cost_weight, **kwargs,
         )
         self._action_scale = action_scale
         self._healthy_upright = healthy_upright
         self._reset_noise_scale = reset_noise_scale
         self._contact_force_range = contact_force_range
+        self._with_foot_velocities = foot_velocities
         self._forward_reward_weight = forward_reward_weight
         self._healthy_reward = healthy_reward
         self._ctrl_cost_weight = ctrl_cost_weight
@@ -93,6 +101,9 @@ class KyonEnv(MujocoEnv, utils.EzPickle):
         self._contact_body_ids = np.array(
             [name2id(model, mujoco.mjtObj.mjOBJ_BODY, b) for b in CONTACT_BODIES]
         )
+        self._foot_geom_ids = [
+            name2id(model, mujoco.mjtObj.mjOBJ_GEOM, g) for g in FOOT_GEOMS
+        ]
 
         # Home pose, and the servo targets that hold it.
         self._home_qpos = model.key_qpos[0].copy()
@@ -108,6 +119,8 @@ class KyonEnv(MujocoEnv, utils.EzPickle):
         )
 
         obs_size = 1 + 4 + len(LEG_JOINTS) + 6 + len(LEG_JOINTS) + 6 * len(CONTACT_BODIES)
+        if self._with_foot_velocities:
+            obs_size += 3 * len(FOOT_GEOMS)
         self.observation_space = Box(-np.inf, np.inf, (obs_size,), dtype=np.float64)
         # Residual around the home stance, not absolute joint targets: it puts
         # the policy's zero action on a pose that already stands.
@@ -121,15 +134,30 @@ class KyonEnv(MujocoEnv, utils.EzPickle):
         lo, hi = self._contact_force_range
         return np.clip(self.data.cfrc_ext[self._contact_body_ids], lo, hi)
 
+    def _foot_velocities(self):
+        """World-frame linear velocity of each contact sphere, ``(4, 3)``."""
+        out = np.empty((len(self._foot_geom_ids), 3))
+        res = np.zeros(6)
+        for row, gid in enumerate(self._foot_geom_ids):
+            mujoco.mj_objectVelocity(
+                self.model, self.data, mujoco.mjtObj.mjOBJ_GEOM, gid, res, 0
+            )
+            # MuJoCo spatial vectors are rotational-first: [angular, linear].
+            out[row] = res[3:]
+        return out
+
     def _get_obs(self):
         qpos, qvel = self.data.qpos, self.data.qvel
-        return np.concatenate([
+        parts = [
             qpos[2:7],                      # height, then the base quaternion
             qpos[self._leg_qpos_adr],
             qvel[:6],                       # base linear, then angular velocity
             qvel[self._leg_qvel_adr],
             self._contact_forces().ravel(),
-        ])
+        ]
+        if self._with_foot_velocities:
+            parts.append(self._foot_velocities().ravel())
+        return np.concatenate(parts)
 
     @property
     def is_healthy(self):

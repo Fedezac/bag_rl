@@ -246,6 +246,40 @@ def parse_args():
         ),
     )
     p.add_argument(
+        "--gait-mode",
+        choices=["static", "phase"],
+        default="static",
+        help=(
+            "which contact pattern the gait terms ask for. 'static' is one "
+            "trot at every command. 'phase' gives the robot a gait clock, "
+            "shown to the policy as (sin, cos), and schedules the pattern on "
+            "the commanded twist: standing still with four feet down, a "
+            "four-beat lateral-sequence walk at low speed, a trot above "
+            "--gait-speeds' second value. It widens the observation by two, so "
+            "a checkpoint trained under one mode cannot seed the other."
+        ),
+    )
+    p.add_argument(
+        "--gait-speeds",
+        default=None,
+        help=(
+            "where --gait-mode phase changes gait, as 'walk,trot,blend' in m/s "
+            "(default '0.10,1.00,0.30'). The speed is the commanded one, "
+            "linear plus what the yaw command asks of the feet, so the robot "
+            "cannot earn the easier pattern by moving slower than it was told."
+        ),
+    )
+    p.add_argument(
+        "--gait-freq",
+        default=None,
+        help=(
+            "gait clock frequency as 'min,max' in Hz (default '1.2,2.6'), "
+            "interpolated over the vx command range. Too high asks for a "
+            "stride the robot cannot swing through and puts the phase term in "
+            "direct conflict with tracking."
+        ),
+    )
+    p.add_argument(
         "--torque-weight",
         type=float,
         default=0.0,
@@ -320,6 +354,32 @@ def parse_args():
             "how the policy standard deviation is produced. 'dependent' reads "
             "it off the network output (NormalParamExtractor); 'independent' "
             "learns one free parameter per action dim (PPO/SB3 convention)."
+        ),
+    )
+    p.add_argument(
+        "--action-scale",
+        type=float,
+        default=None,
+        help=(
+            "radians of joint travel per unit action, about the home pose "
+            "(Kyon's own default is 0.5). It sets the reachable stride, and so "
+            "the top speed a given gait frequency can deliver: at 0.5 the foot "
+            "travels 0.655 m fore-aft, which at 2.6 Hz is about 0.85 m/s using "
+            "half that travel. Raise it to ask for more speed without asking "
+            "for a faster cadence."
+        ),
+    )
+    p.add_argument(
+        "--drag-weight",
+        type=float,
+        default=0.0,
+        help=(
+            "penalty on a settled foot sliding, in reward per m/s of slip "
+            "summed over the feet. Needs an env whose layout carries foot "
+            "velocities (Kyon-v2); silently inactive otherwise. A penalty and "
+            "not a constraint: some slip is inherent to walking, so a drag "
+            "budget can never be met and its multiplier would ramp until it "
+            "swamped the objective."
         ),
     )
     p.add_argument(
@@ -492,6 +552,9 @@ def main():
         num_workers=args.num_workers,
         envs_per_worker=args.envs_per_worker,
         env_batch_mode=args.env_batch_mode,
+        gym_kwargs=(
+            {} if args.action_scale is None else {"action_scale": args.action_scale}
+        ),
         frames_per_batch=args.frames_per_batch,
         total_frames=args.total_frames,
         eval_every=args.eval_every,

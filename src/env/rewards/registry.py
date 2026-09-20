@@ -6,7 +6,7 @@ from src.env.rewards.combined import (
     gait_twist,
     gait_twist_sum,
 )
-from src.env.rewards.gait import GaitReward
+from src.env.rewards.gait import GaitReward, PhaseGaitReward
 from src.env.rewards.posture import HumanoidUprightReward
 from src.env.rewards.twist import TwistTrackingReward
 
@@ -23,6 +23,7 @@ REWARD_SHAPERS = {
     _key(shaper): shaper
     for shaper in (
         GaitReward,
+        PhaseGaitReward,
         HumanoidUprightReward,
         TwistTrackingReward,
         gait_twist,

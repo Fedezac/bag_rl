@@ -18,8 +18,12 @@ from src.env.rewards.combined import (
     gait_twist,
     gait_twist_sum,
 )
-from src.env.rewards.effort import ActionCostReward, with_action_cost
-from src.env.rewards.gait import AntGaitReward, GaitReward
+from src.env.rewards.effort import (
+    ActionCostReward,
+    FootDragReward,
+    with_action_cost,
+)
+from src.env.rewards.gait import AntGaitReward, GaitReward, PhaseGaitReward
 from src.env.rewards.posture import HumanoidUprightReward
 from src.env.rewards.registry import (
     REWARD_SHAPERS,
@@ -34,8 +38,10 @@ __all__ = [
     "ActionCostReward",
     "AntGaitReward",
     "CompositeReward",
+    "FootDragReward",
     "GaitReward",
     "HumanoidUprightReward",
+    "PhaseGaitReward",
     "RewardShapingBase",
     "build_shaping",
     "TrackingGatedGait",

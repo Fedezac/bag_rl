@@ -48,6 +48,26 @@ def gait_weights(spec):
     return parts
 
 
+def gait_speeds(spec):
+    """``'0.1,1.0,0.3'`` -> ``(walk, trot, blend)`` in m/s, or ``None``."""
+    if not spec:
+        return None
+    parts = tuple(float(v) for v in str(spec).split(","))
+    if len(parts) != 3:
+        raise SystemExit("--gait-speeds needs three values: walk,trot,blend")
+    return parts
+
+
+def gait_freq(spec):
+    """``'1.2,2.6'`` -> ``(min, max)`` in Hz, or ``None`` for defaults."""
+    if not spec:
+        return None
+    parts = tuple(float(v) for v in str(spec).split(","))
+    if len(parts) != 2:
+        raise SystemExit("--gait-freq needs two values: min,max")
+    return parts
+
+
 def build_shaping(args):
     """The ``custom_reward_functions`` spec for ``args``.
 
@@ -79,23 +99,28 @@ def build_shaping(args):
         w_wz=w_wz,
     )
 
+    gait_kw = dict(
+        w_gait=args.gait_weight,
+        gait_mode=getattr(args, "gait_mode", "static"),
+        gait_weights=gait_weights(getattr(args, "gait_weights", None)),
+        gait_speeds=gait_speeds(getattr(args, "gait_speeds", None)),
+        gait_freq=gait_freq(getattr(args, "gait_freq", None)),
+    )
+
     if shaping == "gait_twist":
-        spec = partial(
-            gait_twist,
-            w_gait=args.gait_weight,
-            gait_weights=gait_weights(getattr(args, "gait_weights", None)),
-            **kw,
-        )
+        spec = partial(gait_twist, **gait_kw, **kw)
     elif shaping == "gait_twist_sum":
-        spec = partial(gait_twist_sum, w_gait=args.gait_weight, **kw)
+        spec = partial(gait_twist_sum, **gait_kw, **kw)
     else:
         spec = partial(TwistTrackingReward, **kw)
 
-    if args.torque_weight or args.action_rate_weight:
+    drag_weight = getattr(args, "drag_weight", 0.0)
+    if args.torque_weight or args.action_rate_weight or drag_weight:
         spec = partial(
             with_action_cost,
             spec,
             w_torque=args.torque_weight,
             w_action_rate=args.action_rate_weight,
+            w_drag=drag_weight,
         )
     return spec

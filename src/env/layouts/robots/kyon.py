@@ -14,6 +14,20 @@ register(
     max_episode_steps=1000,
 )
 
+# v2 is v1 plus the four feet's world-frame linear velocities. Nothing else
+# moves: the block is appended, so every v1 offset still reads the same
+# quantity, and a term that does not ask for foot velocities cannot tell the
+# two apart.
+register(
+    id="Kyon-v2",
+    entry_point="src.env.robots.kyon_env:KyonEnv",
+    max_episode_steps=1000,
+    kwargs={"foot_velocities": True},
+)
+
+# frame_skip 10 x the model's 2 ms timestep.
+CONTROL_DT = 0.02
+
 # Kyon-v1 (obs 137): qpos[2:7] -> [0:5], the 12 leg joints -> [5:17],
 # qvel[:6] -> [17:23], the 12 leg joint velocities -> [23:35], then
 # cfrc_ext over 17 selected bodies -> [35:137] as 17 x 6. The arms are pinned
@@ -36,9 +50,39 @@ KYON_V1 = ObservationLayout(
     n_contact_bodies=17,
     foot_rows=(13, 14, 15, 16),
     gait_pairs=((0, 3), (1, 2)),
+    fore_feet=(0, 1),
+    control_dt=CONTROL_DT,
     # Pelvis height with the SRDF home pose resting on the floor, measured by
     # forward kinematics in tools/build_kyon_model.py.
     nominal_height=0.538,
 )
 
+# Kyon-v2 (obs 149): v1, then the four contact spheres' world-frame linear
+# velocities -> [137:149] as 4 x 3, in foot_rows order.
+#
+# The contact-force slice moves to the force half of cfrc_ext. v1 reads the
+# torque half, which the gymnasium layouts were calibrated against and which
+# works as a detector because both halves saturate against the [-1, 1] clip
+# under load -- but the drag term needs a real force, and a layout should not
+# call a torque one.
+KYON_V2 = ObservationLayout(
+    obs_dim=149,
+    height=0,
+    quaternion=(1, 5),
+    joint_position=(5, 17),
+    linear_velocity=(17, 20),
+    angular_velocity=(20, 23),
+    joint_velocity=(23, 35),
+    contact_forces=(35, 137),
+    n_contact_bodies=17,
+    foot_rows=(13, 14, 15, 16),
+    contact_force_components=(3, 6),
+    foot_velocity=(137, 149),
+    gait_pairs=((0, 3), (1, 2)),
+    fore_feet=(0, 1),
+    control_dt=CONTROL_DT,
+    nominal_height=0.538,
+)
+
 register_layout(KYON_V1, "Kyon-v1")
+register_layout(KYON_V2, "Kyon-v2")

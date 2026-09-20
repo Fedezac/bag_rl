@@ -37,9 +37,29 @@ class ObservationLayout:
     contact_forces: tuple[int, int] | None = None
     n_contact_bodies: int = 0
     foot_rows: tuple[int, ...] = ()
+    # Which half of each ``cfrc_ext`` row carries the force. MuJoCo spatial
+    # vectors are rotational-first, so a row is [torque(3), force(3)] and (3, 6)
+    # is the physical contact force. (0, 3) -- the torque about the body CoM --
+    # is what the gymnasium-derived layouts were calibrated against: clipped to
+    # [-1, 1] both halves saturate under load and vanish in the air, so either
+    # works as a contact *detector*, but only the force half is a force.
+    contact_force_components: tuple[int, int] = (0, 3)
+    # World-frame linear velocity per foot, laid out as ``n_feet x 3``. ``None``
+    # for robots whose observation omits it, which is every gymnasium built-in.
+    foot_velocity: tuple[int, int] | None = None
     # Diagonal gait couplets, as indices into ``foot_rows``. A quadruped trot
     # pairs (0, 2) and (1, 3); a biped simply alternates its two feet.
     gait_pairs: tuple[tuple[int, ...], ...] = field(default_factory=tuple)
+    # Which of ``foot_rows`` are front feet. A walk is a lateral sequence --
+    # each hind foot lands a quarter cycle before the fore foot diagonal to it
+    # -- so the gait clock has to know which end of the robot a foot is on.
+    # Reading it off the pairing instead would only work if every layout wrote
+    # its couplets fore-first, which is a convention nothing enforces.
+    fore_feet: tuple[int, ...] = ()
+    # Seconds of wall-clock per policy step (MuJoCo timestep x frame_skip). Only
+    # a term that integrates -- the gait clock -- needs it, and a wrong value is
+    # silent, so tools/verify_kyon.py checks it against the env's own ``dt``.
+    control_dt: float = 0.05
     planar: bool = False
 
     # -- accessors ----------------------------------------------------------
@@ -116,12 +136,16 @@ class ObservationLayout:
         lo, hi = self.contact_forces
         return obs[..., lo:hi].unflatten(-1, (self.n_contact_bodies, 6))
 
+    def _force_magnitude(self, cfrc, rows):
+        lo, hi = self.contact_force_components
+        return cfrc[..., rows, lo:hi].norm(dim=-1)
+
     def foot_forces(self, obs):
-        """Linear contact-force magnitude per foot, or ``None``."""
+        """Contact-force magnitude per foot, or ``None``."""
         cfrc = self.contact_matrix(obs)
         if cfrc is None or not self.foot_rows:
             return None
-        return cfrc[..., self.foot_rows, :3].norm(dim=-1)
+        return self._force_magnitude(cfrc, list(self.foot_rows))
 
     def non_foot_forces(self, obs):
         """Contact-force magnitude on every body that is NOT a foot.
@@ -136,4 +160,16 @@ class ObservationLayout:
         rows = [i for i in range(self.n_contact_bodies) if i not in self.foot_rows]
         if not rows:
             return None
-        return cfrc[..., rows, :3].norm(dim=-1)
+        return self._force_magnitude(cfrc, rows)
+
+    def foot_velocities(self, obs):
+        """``(..., n_feet, 3)`` world-frame foot velocities, or ``None``.
+
+        What a slip or drag term needs and cannot reconstruct: the observation
+        carries joint velocities, not Cartesian ones, and turning one into the
+        other takes the leg's Jacobian.
+        """
+        if self.foot_velocity is None:
+            return None
+        lo, hi = self.foot_velocity
+        return obs[..., lo:hi].unflatten(-1, (len(self.foot_rows), 3))

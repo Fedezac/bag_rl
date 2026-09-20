@@ -52,10 +52,15 @@ class TwistTrackingReward(RewardShapingBase):
         w_wz=1.0,
         idle_weight=1.0,
         rest_eps=0.05,
+        obs_offset=0,
     ):
         super().__init__()
         self.layout = get_layout(env_name)
         self.base_obs_dim = self.layout.obs_dim
+        # Width another shaper appends ahead of this one -- the gait clock's
+        # phase. The command has to stay LAST in the observation, because
+        # that is where the trainer reads it back from to score tracking.
+        self.obs_offset = obs_offset
         self.command_ranges = command_ranges
         # Fraction of each axis's extent kept clear of zero when sampling.
         # A scalar applies to all three; a triple sets them per axis.
@@ -254,7 +259,7 @@ class TwistTrackingReward(RewardShapingBase):
     def _append_command(self, tensordict):
         """Concatenate the command onto the observation."""
         obs = tensordict["observation"]
-        if obs.shape[-1] != self.base_obs_dim:
+        if obs.shape[-1] != self.base_obs_dim + self.obs_offset:
             return tensordict
         cmd = self.command.to(obs.device, obs.dtype).expand(
             *obs.shape[:-1], self.COMMAND_DIM

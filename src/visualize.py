@@ -30,21 +30,24 @@ from torchrl.envs.utils import (  # noqa: E402
 
 from src.env.rewards import (  # noqa: E402
     REWARD_SHAPERS,
+    PhaseGaitReward,
     find_gait_shaper,
     find_twist_shaper,
 )
+from src.env.rewards.cli import gait_freq, gait_speeds  # noqa: E402
 from src.env.utils import make_single_env  # noqa: E402
 from src.ppo import PPO  # noqa: E402
 
 #: (label, vx, vy, wz). Chosen so each segment is visually distinguishable from
 #: the last -- a sequence of near-identical commands proves nothing.
 DEFAULT_SCRIPT = [
-    ("forward", 1.2, 0.0, 0.0),
+    ("stand still", 0.0, 0.0, 0.0),
+    ("walk", 0.6, 0.0, 0.0),
+    ("trot", 1.6, 0.0, 0.0),
     ("turn left", 0.6, 0.0, 0.8),
     ("turn right", 0.6, 0.0, -0.8),
-    ("strafe left", 0.0, 0.4, 0.0),
-    ("stand still", 0.0, 0.0, 0.0),
-    ("reverse", -0.4, 0.0, 0.0),
+    ("strafe left", 0.0, 0.3, 0.0),
+    ("reverse", -0.5, 0.0, 0.0),
 ]
 
 
@@ -58,6 +61,11 @@ def parse_args():
         default="gait_twist",
     )
     p.add_argument("--gait-weight", type=float, default=0.5)
+    # The gait knobs have to match the run: --gait-mode phase widens the
+    # observation, so a checkpoint trained with it will not load without it.
+    p.add_argument("--gait-mode", choices=["static", "phase"], default="static")
+    p.add_argument("--gait-speeds", default=None, help="'walk,trot,blend' in m/s")
+    p.add_argument("--gait-freq", default=None, help="'min,max' in Hz")
     p.add_argument(
         "--num-cells",
         type=int,
@@ -179,7 +187,13 @@ def main():
 
     builder = REWARD_SHAPERS[args.shaping]
     if args.shaping.startswith("gait_twist"):
-        builder = partial(builder, w_gait=args.gait_weight)
+        builder = partial(
+            builder,
+            w_gait=args.gait_weight,
+            gait_mode=args.gait_mode,
+            gait_speeds=gait_speeds(args.gait_speeds),
+            gait_freq=gait_freq(args.gait_freq),
+        )
     shaping = partial(builder, env_name=args.env_name)
 
     # Warmup off: the observation statistics come from the checkpoint, and
@@ -221,6 +235,7 @@ def main():
     # dots in the video agree with the number the policy was trained on.
     gait = find_gait_shaper(env.transform)
     contact_threshold = 0.3 if gait is None else gait.contact_threshold
+    clock = gait if isinstance(gait, PhaseGaitReward) else None
 
     import imageio
 
@@ -264,6 +279,13 @@ def main():
                     phase, stance = gait.gait_terms(obs)
                     row["phase"] = float(phase)
                     row["stance"] = float(stance)
+                if contacts is not None:
+                    # What gait it actually chose: 1.0 is standing, 0.75 a
+                    # walk, 0.5 a trot.
+                    row["duty"] = sum(contacts) / len(contacts)
+                if clock is not None:
+                    row["duty_target"] = clock.duty()
+                    row["clock"] = clock._phase
                 trace.append(row)
                 if bool(td["next", "done"].any()):
                     # A fall mid-script is a result, not an error -- record it
@@ -297,6 +319,12 @@ def main():
             gait_bits = (
                 f" phase={np.mean([r['phase'] for r in held]):.2f}"
                 f" stance={np.mean([r['stance'] for r in held]):.2f}"
+            )
+        if "duty" in held[0]:
+            got_duty = np.mean([r["duty"] for r in held])
+            want = held[0].get("duty_target")
+            gait_bits += f" duty={got_duty:.2f}" + (
+                "" if want is None else f"/{want:.2f}"
             )
         print(
             f"  {label:<12} cmd=({vx:+.2f},{vy:+.2f},{wz:+.2f}) "

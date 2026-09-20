@@ -11,7 +11,12 @@ from torchrl.collectors import MultiSyncCollector
 from torchrl.envs.utils import ExplorationType, set_exploration_type
 from tqdm import tqdm
 
-from src.env.rewards import TwistTrackingReward, find_twist_shaper
+from src.env.rewards import (
+    PhaseGaitReward,
+    TwistTrackingReward,
+    find_gait_shaper,
+    find_twist_shaper,
+)
 from src.env.utils import make_batched_env, make_single_env
 
 
@@ -45,6 +50,10 @@ class Trainer:
         num_workers=8,
         envs_per_worker=8,
         env_batch_mode="serial",
+        # Extra kwargs for the gym env itself (e.g. action_scale). They go
+        # to the collector, eval and render envs alike: an eval env built
+        # with different dynamics would be measuring another robot.
+        gym_kwargs=None,
         frames_per_batch=8192,
         total_frames=204_800,
         eval_every=5,
@@ -77,6 +86,7 @@ class Trainer:
         self.num_workers = num_workers
         self.envs_per_worker = envs_per_worker
         self.env_batch_mode = env_batch_mode
+        self.gym_kwargs = dict(gym_kwargs or {})
         self.frames_per_batch = frames_per_batch
         self.total_frames = total_frames
         self.num_iterations = max(1, total_frames // frames_per_batch)
@@ -129,6 +139,7 @@ class Trainer:
             mode=self.env_batch_mode,
             custom_reward_functions=self.custom_reward_functions,
             constraints=self.constraints,
+            **self.gym_kwargs,
         )
         self.collector = MultiSyncCollector(
             create_env_fn=[env_fn] * self.num_workers,
@@ -153,10 +164,15 @@ class Trainer:
             self.device,
             custom_reward_functions=self.custom_reward_functions,
             constraints=self.constraints,
+            **self.gym_kwargs,
         )
         # Pin the eval commands: a redrawn set puts the draw's spread straight
         # into the curve and into checkpoint selection.
         self.eval_shaper = find_twist_shaper(self.eval_env.transform)
+        # Only the phase gait schedules a pattern worth measuring; the
+        # static one asks for the same trot at every command.
+        gait = find_gait_shaper(self.eval_env.transform)
+        self.eval_gait = gait if isinstance(gait, PhaseGaitReward) else None
         if self.eval_shaper is not None and self.eval_shaper.command_ranges:
             self.eval_shaper.use_fixed_commands(
                 self.eval_shaper.command_set(self.eval_episodes)
@@ -183,6 +199,7 @@ class Trainer:
                 custom_reward_functions=self.custom_reward_functions,
                 constraints=self.constraints,
                 render_mode="rgb_array",
+                **self.gym_kwargs,
             )
             Path(self.video_folder).mkdir(parents=True, exist_ok=True)
             self.video_writer = imageio.get_writer(
@@ -270,7 +287,7 @@ class Trainer:
     def evaluate(self):
         """Roll the policy out without exploration and log"""
         returns, shaped, per_step, steps, costs = [], [], [], [], []
-        mae = []
+        mae, gait_rows = [], []
         if self.eval_shaper is not None:
             # Same commands, same order, every eval.
             self.eval_shaper.rewind_commands()
@@ -279,6 +296,8 @@ class Trainer:
                 rollout = self.eval_env.rollout(self.eval_steps, self.algorithm.policy)
                 if self.eval_shaper is not None:
                     mae.append(self._tracking_error(rollout))
+                if self.eval_gait is not None:
+                    gait_rows.append(self._gait_stats(rollout))
                 returns.append(rollout["next", self.reward_key].sum().item())
                 per_step.append(rollout["next", self.reward_key].mean().item())
                 if self.shaped_key is not None:
@@ -320,7 +339,59 @@ class Trainer:
                     )
                 )
 
+        if gait_rows:
+            # Split by what the schedule ASKED for, so the bands follow the
+            # configuration rather than a threshold repeated here. Commanded
+            # stops are left out of both: standing is four feet down, and
+            # averaging it into the walk would hide the thing being measured.
+            trot_duty = self.eval_gait.duty(
+                self.eval_gait.trot_speed + self.eval_gait.gait_blend
+            )
+            walking = [
+                r
+                for r in gait_rows
+                if r[0] >= self.eval_gait.walk_speed and r[2] > trot_duty + 1e-6
+            ]
+            trotting = [r for r in gait_rows if r[2] <= trot_duty + 1e-6]
+            if walking:
+                self.logs["eval duty (walk)"].append(
+                    statistics.fmean(r[1] for r in walking)
+                )
+            if trotting:
+                self.logs["eval duty (trot)"].append(
+                    statistics.fmean(r[1] for r in trotting)
+                )
+            # The gap between those two is the whole point of the schedule.
+            self.logs["eval duty err"].append(
+                statistics.fmean(abs(r[1] - r[2]) for r in gait_rows)
+            )
+            self.logs["eval phase match"].append(
+                statistics.fmean(r[3] for r in gait_rows)
+            )
+
         self._maybe_checkpoint()
+
+    def _gait_stats(self, rollout):
+        """``(commanded speed, achieved duty, target duty, phase match)``.
+
+        The phase is read back out of the observation, not off the live clock,
+        which by now has run on to wherever the episode ended.
+        """
+        gait = self.eval_gait
+        obs = rollout["next", "observation"]
+        speed = gait.effective_speed(obs[0, -TwistTrackingReward.COMMAND_DIM :])
+        contact = gait.contacts(obs)
+        lo = -TwistTrackingReward.COMMAND_DIM - gait.PHASE_DIM
+        phase = (
+            torch.atan2(obs[..., lo], obs[..., lo + 1]) % (2 * torch.pi)
+        ) / (2 * torch.pi)
+        match = (contact == gait.target_contact_at(phase, speed)).to(torch.float32)
+        return (
+            speed,
+            contact.to(torch.float32).mean().item(),
+            gait.duty(speed),
+            match.mean().item(),
+        )
 
     def _tracking_error(self, rollout):
         """Mean |achieved - commanded| per axis over one eval episode."""
